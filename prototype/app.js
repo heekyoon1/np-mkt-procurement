@@ -41,7 +41,7 @@ function renderAuth(mode = "login", error = "") {
   document.querySelector("#authForm").addEventListener("submit", (event) => { event.preventDefault(); const form = new FormData(event.target); const email = String(form.get("email")).trim().toLowerCase(); const password = String(form.get("password")); if (mode === "login") { const user = authState.users.find((item) => item.email === email && item.password === password); if (!user) { renderAuth("login", "이메일 또는 비밀번호를 확인해 주세요."); return; } currentUser = { name: user.name, email: user.email, role: user.role }; authState.currentUser = currentUser; state.role = user.role; state.view = "dashboard"; saveAuth(); render(); return; } if (password !== String(form.get("passwordConfirm"))) { renderAuth("signup", "비밀번호가 일치하지 않습니다."); return; } if (authState.users.some((item) => item.email === email)) { renderAuth("signup", "이미 등록된 이메일입니다."); return; } const user = { name: String(form.get("name")).trim(), email, password, role: String(form.get("role")) }; authState.users.push(user); currentUser = { name: user.name, email: user.email, role: user.role }; authState.currentUser = currentUser; state.role = user.role; state.view = "dashboard"; saveAuth(); render(); });
 }
 let state = loadState();
-state.cdTransactions = state.cdTransactions || [];
+state.cdTransactions = (state.cdTransactions || []).map(normalizeCdTransaction);
 state.importBatches = state.importBatches || [];
 state.importWarnings = state.importWarnings || [];
 state.maintenancePayments = state.maintenancePayments || [];
@@ -53,7 +53,32 @@ if (JSON.stringify(state.cdTransactions).includes("�")) { state.cdTransactions
 function loadState() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || structuredClone(initialState); } catch { return structuredClone(initialState); } }
 function saveState() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
 function esc(value = "") { return String(value).replace(/[&<>'"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c])); }
-function money(value, currency = "KRW") { if (value === null || value === undefined || value === "") return "미표시"; return `${currency === "KRW" ? "₩" : currency + " "}${Math.round(Number(value)).toLocaleString("ko-KR")}`; }
+function finiteNumber(value, fallback = 0) {
+  if (value === null || value === undefined || value === "") return fallback;
+  if (typeof value === "number") return Number.isFinite(value) ? value : fallback;
+  const raw = String(value).trim();
+  if (!raw || raw === "-") return fallback;
+  const negative = /^\(.*\)$/.test(raw);
+  const parsed = Number(raw.replace(/[(),₩원\s]/g, "").replace(/%$/, ""));
+  return Number.isFinite(parsed) ? (negative ? -parsed : parsed) : fallback;
+}
+function normalizedRate(value) {
+  if (value === null || value === undefined || value === "") return 0;
+  const raw = String(value).trim();
+  const rate = finiteNumber(raw, 0);
+  return raw.includes("%") || Math.abs(rate) > 1 ? rate / 100 : rate;
+}
+function normalizeCdTransaction(row = {}) {
+  return {
+    ...row,
+    quantity: finiteNumber(row.quantity),
+    unitPrice: finiteNumber(row.unitPrice),
+    purchaseAmount: finiteNumber(row.purchaseAmount),
+    costDownAmount: finiteNumber(row.costDownAmount),
+    costDownRate: normalizedRate(row.costDownRate),
+  };
+}
+function money(value, currency = "KRW") { if (value === null || value === undefined || value === "") return "미표시"; return `${currency === "KRW" ? "₩" : currency + " "}${Math.round(finiteNumber(value)).toLocaleString("ko-KR")}`; }
 function canonicalBuyerCategory(value) { const raw = String(value || "").trim(); const key = raw.normalize("NFKC").toLocaleLowerCase("ko-KR").trim(); return state.categoryAliases?.[key] || buyerCategoryAliases[key] || raw; }
 function resolveBuyerForCategory(value) { const category = canonicalBuyerCategory(value); return state.buyerCategoryMappings?.[category] || buyerMap[category] || null; }
 function statusClass(status) { if (status === "쉽컴펌 완료" || status === "완료") return "status-mint"; if (status === "견적완료" || status === "발주중") return "status-gold"; if (status === "반려" || status === "Buyer 결정 필요") return "status-red"; return "status-blue"; }
@@ -384,7 +409,7 @@ async function handleCdImport(event) {
   const response = await fetch("/api/import-cd", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ fileName: file.name, data: btoa(binary) }) });
   const result = await response.json();
   if (!result.ok) { toast(result.missing ? `필수 컬럼 누락: ${result.missing.join(", ")}` : result.error || "파일을 읽지 못했습니다."); return; }
-  const rows = result.rows || [];
+  const rows = (result.rows || []).map(normalizeCdTransaction);
   const skippedTemplateRows = Number(result.skippedTemplateRows || 0);
   const byPo = new Map();
   state.cdTransactions = state.cdTransactions || [];
