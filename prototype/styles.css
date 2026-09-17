@@ -85,6 +85,7 @@ button { cursor: pointer; }
 .crumb { color: var(--muted); font-size: 12px; }
 .top-actions { display: flex; align-items: center; gap: 14px; }
 .role-select { border: 1px solid var(--border); background: #fff; border-radius: 8px; padding: 8px 12px; color: var(--text); }
+.role-chip { border: 1px solid #bfe7da; background: var(--mint); color: var(--mint-text); border-radius: 999px; padding: 7px 11px; font-size: 11px; font-weight: 800; }
 .profile { display: flex; align-items: center; gap: 9px; font-size: 12px; font-weight: 700; }
 .avatar { width: 30px; height: 30px; border-radius: 50%; background: var(--sky); color: var(--blue); display: grid; place-items: center; font-size: 11px; }
 .content { flex: 1; min-height: 0; width: 100%; padding: 32px 36px 50px; max-width: 1480px; margin: auto; overflow-y: auto; overflow-x: hidden; }
