@@ -1,0 +1,12 @@
+{
+  "name": "np-mkt-procurement-prototype",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "dependencies": {
+    "xlsx": "^0.18.5"
+  },
+  "scripts": {
+    "dev": "node server.mjs"
+  }
+}

@@ -1,0 +1,24 @@
+# Default-deny: source code and documentation are explicitly allowlisted below.
+*
+!.gitignore
+!.env.example
+
+# Application source
+!prototype/
+!prototype/**
+prototype/node_modules/
+prototype/cd_test.xlsx
+
+# Database schema and project documentation
+!supabase/
+!supabase/**
+!docs/
+!docs/**
+
+# Never publish local runtime configuration or source workbooks.
+.env
+*.xlsx
+*.xlsm
+*.pptx
+*.ppt
+
