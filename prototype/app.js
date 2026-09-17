@@ -30,9 +30,11 @@ const initialState = {
 };
 
 const AUTH_KEY = "np-mkt-prototype-auth-v1";
+const SUPABASE_SESSION_KEY = "np-mkt-supabase-session-v1";
 const initialUsers = [{ name: "김희균", email: "buyer@np-mkt.local", password: "demo1234", role: "buyer" }];
 let authState = loadAuth();
 let currentUser = authState.currentUser;
+let authConfig = { configured: false };
 function normalizedRole(value) { return ["requester", "lead", "buyer", "admin"].includes(value) ? value : "requester"; }
 function normalizeAuthState(saved) {
   const users = Array.isArray(saved?.users) ? saved.users.map((item) => ({
@@ -48,10 +50,71 @@ function normalizeAuthState(saved) {
 }
 function loadAuth() { try { return normalizeAuthState(JSON.parse(localStorage.getItem(AUTH_KEY))); } catch { return normalizeAuthState(null); } }
 function saveAuth() { localStorage.setItem(AUTH_KEY, JSON.stringify(authState)); }
+function supabaseAuthEnabled() { return Boolean(authConfig?.configured && authConfig.url && authConfig.anonKey); }
+async function supabaseAuthRequest(path, options = {}) {
+  const response = await fetch(`${authConfig.url.replace(/\/$/, "")}${path}`, {
+    ...options,
+    headers: { apikey: authConfig.anonKey, "Content-Type": "application/json", ...(options.headers || {}) },
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload?.msg || payload?.message || payload?.error_description || "인증 처리에 실패했습니다.");
+  return payload;
+}
+async function profileForSession(session) {
+  const userId = session?.user?.id;
+  if (!userId || !session?.access_token) throw new Error("로그인 세션이 올바르지 않습니다.");
+  const rows = await supabaseAuthRequest(`/rest/v1/profiles?select=id,name,email,role,is_active&id=eq.${encodeURIComponent(userId)}`, {
+    headers: { Authorization: `Bearer ${session.access_token}` },
+  });
+  const profile = Array.isArray(rows) ? rows[0] : null;
+  if (!profile) throw new Error("사용자 프로필을 찾을 수 없습니다. 잠시 후 다시 로그인해 주세요.");
+  if (profile.is_active === false) throw new Error("비활성화된 계정입니다. 관리자에게 문의해 주세요.");
+  return { name: profile.name || session.user.email, email: profile.email || session.user.email, role: normalizedRole(profile.role) };
+}
+function saveSupabaseSession(session) { localStorage.setItem(SUPABASE_SESSION_KEY, JSON.stringify(session)); }
+function clearSupabaseSession() { localStorage.removeItem(SUPABASE_SESSION_KEY); }
+async function loginWithSupabase(email, password) {
+  const session = await supabaseAuthRequest("/auth/v1/token?grant_type=password", { method: "POST", body: JSON.stringify({ email, password }) });
+  const profile = await profileForSession(session);
+  saveSupabaseSession(session);
+  return profile;
+}
+async function registerWithSupabase(name, email, password) {
+  const result = await supabaseAuthRequest("/auth/v1/signup", { method: "POST", body: JSON.stringify({ email, password, data: { name } }) });
+  if (!result.session) return null;
+  const profile = await profileForSession(result.session);
+  saveSupabaseSession(result.session);
+  return profile;
+}
+async function bootstrapAuth() {
+  try {
+    const response = await fetch("/api/auth-config", { cache: "no-store" });
+    authConfig = await response.json();
+  } catch { authConfig = { configured: false }; }
+  if (supabaseAuthEnabled()) {
+    currentUser = null;
+    authState.currentUser = null;
+    try {
+      const session = JSON.parse(localStorage.getItem(SUPABASE_SESSION_KEY) || "null");
+      if (session?.access_token && (!session.expires_at || session.expires_at * 1000 > Date.now())) currentUser = await profileForSession(session);
+    } catch { clearSupabaseSession(); }
+  }
+  render();
+}
+async function completeLogin(user) {
+  currentUser = user;
+  authState.currentUser = user;
+  state.role = user.role;
+  state.view = "dashboard";
+  saveAuth();
+  saveState();
+  render();
+}
 function renderAuth(mode = "login", error = "") {
-  document.querySelector("#app").innerHTML = `<div class="auth-shell"><div class="auth-card"><div class="auth-brand"><div class="brand-mark">NP</div><div><strong>NP MKT</strong><span>구매업무 통합시스템</span></div></div><h1>${mode === "login" ? "로그인" : "회원가입"}</h1><p>${mode === "login" ? "회사 구매업무 시스템을 이용하려면 로그인하세요." : "NP MKT 구매업무 시스템 계정을 생성합니다."}</p><div class="auth-tabs"><button class="auth-tab ${mode === "login" ? "active" : ""}" data-auth-tab="login">로그인</button><button class="auth-tab ${mode === "signup" ? "active" : ""}" data-auth-tab="signup">회원가입</button></div><form class="auth-form" id="authForm"><div class="auth-field ${mode === "signup" ? "" : "hidden"}"><label>이름</label><input name="name" placeholder="이름" ${mode === "signup" ? "required" : ""} /></div><div class="auth-field"><label>회사 이메일</label><input name="email" type="email" placeholder="name@company.com" required /></div><div class="auth-field"><label>비밀번호</label><input name="password" type="password" placeholder="비밀번호" minlength="6" required /></div>${mode === "signup" ? `<div class="auth-field"><label>비밀번호 확인</label><input name="passwordConfirm" type="password" placeholder="비밀번호 확인" minlength="6" required /></div>` : ""}<div class="auth-error">${esc(error)}</div><button class="btn btn-primary auth-submit">${mode === "login" ? "로그인" : "회원가입"}</button></form>${mode === "login" ? `<div class="auth-hint">프로토타입 데모 계정<br/>이메일: buyer@np-mkt.local　비밀번호: demo1234</div>` : `<div class="auth-hint">신규 회원은 요청자 권한으로 생성됩니다. Buyer·팀장·관리자 권한은 운영자가 배정합니다.</div>`}</div></div>`;
+  const remote = supabaseAuthEnabled();
+  document.querySelector("#app").innerHTML = `<div class="auth-shell"><div class="auth-card"><div class="auth-brand"><div class="brand-mark">NP</div><div><strong>NP MKT</strong><span>구매업무 통합시스템</span></div></div><h1>${mode === "login" ? "로그인" : "회원가입"}</h1><p>${remote ? "Supabase 인증 기반으로 계정을 확인합니다." : "개발용 로컬 계정으로 로그인합니다."}</p><div class="auth-tabs"><button class="auth-tab ${mode === "login" ? "active" : ""}" data-auth-tab="login">로그인</button><button class="auth-tab ${mode === "signup" ? "active" : ""}" data-auth-tab="signup">회원가입</button></div><form class="auth-form" id="authForm"><div class="auth-field ${mode === "signup" ? "" : "hidden"}"><label>이름</label><input name="name" placeholder="이름" ${mode === "signup" ? "required" : ""} /></div><div class="auth-field"><label>회사 이메일</label><input name="email" type="email" placeholder="name@company.com" required /></div><div class="auth-field"><label>비밀번호</label><input name="password" type="password" placeholder="비밀번호" minlength="6" required /></div>${mode === "signup" ? `<div class="auth-field"><label>비밀번호 확인</label><input name="passwordConfirm" type="password" placeholder="비밀번호 확인" minlength="6" required /></div>` : ""}<div class="auth-error">${esc(error)}</div><button class="btn btn-primary auth-submit">${mode === "login" ? "로그인" : "회원가입"}</button></form>${mode === "login" ? `<div class="auth-hint">${remote ? "기존 브라우저 로컬 계정은 사용할 수 없습니다. 회원가입에서 새 계정을 생성해 주세요." : "프로토타입 데모 계정: buyer@np-mkt.local / demo1234"}</div>` : `<div class="auth-hint">신규 회원은 요청자 권한으로 생성됩니다. Buyer·팀장·관리자 권한은 운영자가 배정합니다.</div>`}</div></div>`;
   document.querySelectorAll("[data-auth-tab]").forEach((tab) => tab.addEventListener("click", () => renderAuth(tab.dataset.authTab)));
-  document.querySelector("#authForm").addEventListener("submit", (event) => { event.preventDefault(); const form = new FormData(event.target); const email = String(form.get("email")).trim().toLowerCase(); const password = String(form.get("password")); if (mode === "login") { const user = authState.users.find((item) => item.email === email && item.password === password); if (!user) { renderAuth("login", "이메일 또는 비밀번호를 확인해 주세요."); return; } currentUser = { name: user.name, email: user.email, role: normalizedRole(user.role) }; authState.currentUser = currentUser; state.role = currentUser.role; state.view = "dashboard"; saveAuth(); saveState(); render(); return; } if (password !== String(form.get("passwordConfirm"))) { renderAuth("signup", "비밀번호가 일치하지 않습니다."); return; } if (authState.users.some((item) => item.email === email)) { renderAuth("signup", "이미 등록된 이메일입니다."); return; } const user = { name: String(form.get("name")).trim(), email, password, role: "requester" }; authState.users.push(user); currentUser = { name: user.name, email: user.email, role: user.role }; authState.currentUser = currentUser; state.role = user.role; state.view = "dashboard"; saveAuth(); saveState(); render(); });
+  document.querySelector("#authForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.target); const email = String(form.get("email")).trim().toLowerCase(); const password = String(form.get("password")); try { if (mode === "login") { const user = remote ? await loginWithSupabase(email, password) : authState.users.find((item) => item.email === email && item.password === password); if (!user) throw new Error("이메일 또는 비밀번호를 확인해 주세요."); await completeLogin({ name: user.name, email: user.email, role: normalizedRole(user.role) }); return; } if (password !== String(form.get("passwordConfirm"))) throw new Error("비밀번호가 일치하지 않습니다."); if (!remote && authState.users.some((item) => item.email === email)) throw new Error("이미 등록된 이메일입니다."); const name = String(form.get("name")).trim(); if (remote) { const user = await registerWithSupabase(name, email, password); if (!user) { renderAuth("login", "가입 확인 메일을 확인한 뒤 로그인해 주세요."); return; } await completeLogin(user); return; } const user = { name, email, password, role: "requester" }; authState.users.push(user); await completeLogin(user); } catch (submitError) { renderAuth(mode, submitError.message || "인증 처리에 실패했습니다."); } });
 }
 let state = loadState();
 if (currentUser) state.role = normalizedRole(currentUser.role);
@@ -1466,7 +1529,7 @@ render = function () {
   if (state.view === "ai") { bindAiEvents(); }
   if (state.view === "suppliers") { bindSuppliersEvents(); }
   const topActions = document.querySelector(".top-actions");
-  if (topActions && !topActions.querySelector("[data-auth-logout]")) { const logout = document.createElement("button"); logout.className = "logout-btn"; logout.dataset.authLogout = "true"; logout.textContent = "로그아웃"; logout.addEventListener("click", () => { currentUser = null; authState.currentUser = null; saveAuth(); render(); }); topActions.appendChild(logout); }
+  if (topActions && !topActions.querySelector("[data-auth-logout]")) { const logout = document.createElement("button"); logout.className = "logout-btn"; logout.dataset.authLogout = "true"; logout.textContent = "로그아웃"; logout.addEventListener("click", async () => { try { const session = JSON.parse(localStorage.getItem(SUPABASE_SESSION_KEY) || "null"); if (supabaseAuthEnabled() && session?.access_token) await supabaseAuthRequest("/auth/v1/logout", { method: "POST", headers: { Authorization: `Bearer ${session.access_token}` } }); } catch {} clearSupabaseSession(); currentUser = null; authState.currentUser = null; saveAuth(); render(); }); topActions.appendChild(logout); }
   renderCategoryPurchaseSummary();
   renderBuyerPurchaseSummary();
   if (!document.querySelector("[data-view='history']")) { const nav = document.querySelector(".nav"); if (nav) { const history = document.createElement("button"); history.textContent = "⌁　구매 이력"; history.dataset.view = "history"; history.className = state.view === "history" ? "active" : ""; history.addEventListener("click", () => { state.view = "history"; render(); }); nav.appendChild(history); } }
@@ -1539,4 +1602,4 @@ function contractsView() {
   return `<div class="page-head"><div><h1>계약·지불관리</h1><p>유지보수 계약, 발주 후 Ship Confirm, 월별 지급 및 AP 전표를 관리합니다.</p></div><div class="toolbar">${canUpload ? `<label class="btn btn-secondary contract-upload-label"><input id="contractFileInput" type="file" accept=".xlsx,.xlsm" hidden/>AP 계약관리 파일 업로드</label>` : ""}<button class="btn btn-primary" data-action="generate-payments">이번 달 지불대상 생성</button></div></div><div class="cards"><div class="metric"><div class="label">계약 전체</div><div class="value">${contracts.length.toLocaleString("ko-KR")}</div><div class="note">PO + 계약 ID 기준</div></div><div class="metric"><div class="label">D-60 만료 대상</div><div class="value">${expiring.length.toLocaleString("ko-KR")}</div><div class="note">Buyer 알림 대상</div></div><div class="metric"><div class="label">지급 대상</div><div class="value">${payments.length.toLocaleString("ko-KR")}</div><div class="note">매월 20일 기준</div></div><div class="metric"><div class="label">Ship Confirm</div><div class="value">${shipments.length.toLocaleString("ko-KR")}</div><div class="note">부분 출고 포함</div></div></div><div class="panel"><div class="panel-head"><h2>유지보수 계약 목록</h2><span>계약 만료 알림: D-60 · D-30</span></div>${contracts.length ? `<div class="table-scroll"><table class="table"><thead><tr><th>PO 번호</th><th>계약 ID</th><th>업체</th><th>제품/설명</th><th>종료일</th><th>지급월도</th><th>금액</th><th>Buyer</th></tr></thead><tbody>${contracts.slice(0,100).map((c) => `<tr><td>${esc(c.poNumber || "-")}</td><td><strong>${esc(c.contractId || c.id || "-")}</strong></td><td>${esc(c.vendor || c.supplierName || "-")}</td><td class="wrap-cell">${esc(c.product || "-")}</td><td>${esc(c.endDate || c.end || "-")}</td><td>${esc(c.billingCycle || c.cycle || "-")}</td><td class="num">${money(c.amount || 0, c.currency || "KRW")}</td><td>${esc(c.buyer || "-")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">AP 계약관리 파일을 업로드하면 계약 데이터가 표시됩니다.</div>`}</div><div class="panel"><div class="panel-head"><h2>월별 지급 대상</h2><span>${payments.length}건 · Buyer만 상태 변경 가능</span></div>${payments.length ? `<div class="table-scroll"><table class="table"><thead><tr><th>업체</th><th>제품/설명</th><th>지급월도</th><th>금액</th><th>인보이스번호</th><th>AP 전표번호</th><th>상태</th></tr></thead><tbody>${payments.slice(0,100).map((p) => `<tr><td>${esc(p.supplierName || "-")}</td><td class="wrap-cell">${esc(p.product || "-")}</td><td>${esc(p.paymentMonth || "-")}</td><td class="num">${money(p.amountExclVat || 0)}</td><td>${esc(p.invoiceNumber || "-")}</td><td>${esc(p.apSlipNumber || "-")}</td><td><span class="status ${statusClass(p.paymentStatus)}">${esc(p.paymentStatus || "인수증 발행")}</span></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">지급 대상 데이터가 없습니다.</div>`}</div><div class="panel"><div class="panel-head"><h2>업로드 이력</h2><span>${state.contractImportHistory.length}건</span></div>${state.contractImportHistory.length ? `<table class="table"><thead><tr><th>파일명</th><th>업로드일시</th><th>계약</th><th>지급</th><th>Ship Confirm</th><th>신규</th><th>갱신</th><th>경고</th></tr></thead><tbody>${state.contractImportHistory.slice().reverse().map((h) => `<tr><td>${esc(h.fileName)}</td><td>${esc(h.uploadedAt)}</td><td>${h.rows || 0}</td><td>${h.payments || 0}</td><td>${h.shipments || 0}</td><td>${h.newRows || 0}</td><td>${h.updatedRows || 0}</td><td>${h.warnings || 0}</td></tr>`).join("")}</tbody></table>` : `<div class="empty">업로드 이력이 없습니다.</div>`}</div>`;
 }
 
-render();
+bootstrapAuth();

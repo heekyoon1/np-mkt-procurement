@@ -19,6 +19,13 @@ const port = Number(process.env.PORT || 4173);
 const mime = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".json": "application/json; charset=utf-8" };
 
 const server = http.createServer(async (req, res) => {
+  if (req.method === "GET" && req.url === "/api/auth-config") {
+    const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+    const anonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+    res.end(JSON.stringify({ configured: Boolean(url && anonKey), url: url || null, anonKey: anonKey || null }));
+    return;
+  }
   if (req.method === "GET" && req.url === "/api/health") {
     const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
     const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
