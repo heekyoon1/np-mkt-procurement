@@ -1107,23 +1107,26 @@ function filterDueContracts() {
   toast("30일 이내 만기 계약을 표시했습니다.");
 }
 
-const categoryPurchaseSummary = [
-  ["Maintenance", 59483420.33], ["Others", 4149000], ["PC", 138444000], ["Server", 62857600],
-  ["Software", 7890000], ["비단가계약", 121088921], ["Paper", 657612660], ["Office environment", 53939845],
-  ["Finisher", 17181136], ["Outsourcing", 484926784], ["Document Security", 75740400], ["Video conference", 16531100],
-  ["Construction", 367650000], ["Office Communication", 16800000], ["Business Automation", 5804975.63], ["Network", 111879540],
-  ["Asset Management", 312000],
-].sort((a, b) => b[1] - a[1]);
-const categoryPurchaseTotal = categoryPurchaseSummary.reduce((sum, item) => sum + item[1], 0);
-
 function renderCategoryPurchaseSummary() {
   if (state.view !== "dashboard") return;
   const content = document.querySelector(".content");
   if (!content) return;
-  const max = categoryPurchaseSummary[0][1];
+  const grouped = new Map();
+  (state.cdTransactions || []).forEach((row) => {
+    const category = row.categoryLarge || "미분류";
+    grouped.set(category, (grouped.get(category) || 0) + Number(row.purchaseAmount || 0));
+  });
+  const categoryPurchaseSummary = [...grouped.entries()].filter(([, amount]) => Number.isFinite(amount) && amount > 0).sort((a, b) => b[1] - a[1]);
+  const categoryPurchaseTotal = categoryPurchaseSummary.reduce((sum, [, amount]) => sum + amount, 0);
   const panel = document.createElement("div");
   panel.className = "panel category-summary";
-  panel.innerHTML = `<div class="panel-head"><div><h2>카테고리별 전체 구매액 현황</h2><span>CD분석 · 구입금액 기준 · 상태 완료</span></div><strong>${money(categoryPurchaseTotal)}</strong></div><div class="category-summary-list">${categoryPurchaseSummary.map(([category, amount]) => { const share = amount / categoryPurchaseTotal * 100; return `<div class="category-summary-row" title="${esc(category)} · ${money(amount)} · ${share.toFixed(1)}%"><div class="category-summary-name">${esc(category)}</div><div class="category-summary-track"><div class="category-summary-bar" style="width:${Math.max(1.5, amount / max * 100)}%"></div></div><div class="category-summary-amount">${money(amount)}</div><div class="category-summary-share">${share.toFixed(1)}%</div></div>`; }).join("")}</div>`;
+  if (!categoryPurchaseSummary.length) {
+    panel.innerHTML = `<div class="panel-head"><div><h2>카테고리별 전체 구매액 현황</h2><span>CD집계표 업로드 기준</span></div><strong>데이터 없음</strong></div><div class="empty">CD 업로드 후 실제 구매금액을 기준으로 표시합니다.</div>`;
+    content.appendChild(panel);
+    return;
+  }
+  const max = categoryPurchaseSummary[0][1];
+  panel.innerHTML = `<div class="panel-head"><div><h2>카테고리별 전체 구매액 현황</h2><span>CD집계표 · 구매금액 기준 · 실제 업로드 ${state.cdTransactions.length.toLocaleString("ko-KR")}건</span></div><strong>${money(categoryPurchaseTotal)}</strong></div><div class="category-summary-list">${categoryPurchaseSummary.map(([category, amount]) => { const share = amount / categoryPurchaseTotal * 100; return `<div class="category-summary-row" title="${esc(category)} · ${money(amount)} · ${share.toFixed(1)}%"><div class="category-summary-name">${esc(category)}</div><div class="category-summary-track"><div class="category-summary-bar" style="width:${Math.max(1.5, amount / max * 100)}%"></div></div><div class="category-summary-amount">${money(amount)}</div><div class="category-summary-share">${share.toFixed(1)}%</div></div>`; }).join("")}</div>`;
   content.appendChild(panel);
 }
 
