@@ -36,6 +36,7 @@ let authState = loadAuth();
 let currentUser = authState.currentUser;
 let authConfig = { configured: false };
 let accessData = { loaded: false, loading: false, users: [], requests: [], assignments: [], audits: [], error: "" };
+let notificationData = { loaded: false, loading: false, rows: [], error: "" };
 function normalizedRole(value) { return ["requester", "lead", "buyer", "admin"].includes(value) ? value : "requester"; }
 function normalizeAuthState(saved) {
   const users = Array.isArray(saved?.users) ? saved.users.map((item) => ({
@@ -80,8 +81,8 @@ async function loginWithSupabase(email, password) {
   saveSupabaseSession(session);
   return profile;
 }
-async function registerWithSupabase(name, email, password, requestedRole = "requester", department = "", phone = "") {
-  const result = await supabaseAuthRequest("/auth/v1/signup", { method: "POST", body: JSON.stringify({ email, password, data: { name, requested_role: requestedRole, department, phone } }) });
+async function registerWithSupabase(name, email, password, requestedRole = "requester", department = "", phone = "", requestedCategories = []) {
+  const result = await supabaseAuthRequest("/auth/v1/signup", { method: "POST", body: JSON.stringify({ email, password, data: { name, requested_role: requestedRole, department, phone, requested_categories: requestedCategories } }) });
   if (!result.session) return null;
   const profile = await profileForSession(result.session);
   saveSupabaseSession(result.session);
@@ -120,6 +121,16 @@ async function loadAccessData() {
   } catch (error) { accessData = { ...accessData, loading: false, error: error.message || "사용자 권한 정보를 불러오지 못했습니다." }; }
   if (state.view === "access") render();
 }
+async function loadNotifications() {
+  if (!supabaseAuthEnabled() || notificationData.loading) return;
+  notificationData.loading = true; notificationData.error = "";
+  try {
+    const session = JSON.parse(localStorage.getItem(SUPABASE_SESSION_KEY) || "null");
+    const rows = await supabaseAuthRequest("/rest/v1/user_notifications?select=id,type,title,message,is_read,created_at&order=created_at.desc&limit=100", { headers: { Authorization: `Bearer ${session.access_token}` } });
+    notificationData = { loaded: true, loading: false, rows: Array.isArray(rows) ? rows : [], error: "" };
+  } catch (error) { notificationData = { ...notificationData, loading: false, error: error.message || "알림을 불러오지 못했습니다." }; }
+  if (state.view === "notifications") render();
+}
 async function bootstrapAuth() {
   try {
     const response = await fetch("/api/auth-config", { cache: "no-store" });
@@ -148,7 +159,15 @@ function renderAuth(mode = "login", error = "") {
   const remote = supabaseAuthEnabled();
   document.querySelector("#app").innerHTML = `<div class="auth-shell"><div class="auth-card"><div class="auth-brand"><div class="brand-mark">NP</div><div><strong>NP MKT</strong><span>구매업무 통합시스템</span></div></div><h1>${mode === "login" ? "로그인" : "회원가입"}</h1><p>${remote ? "Supabase 인증 기반으로 계정을 확인합니다." : "개발용 로컬 계정으로 로그인합니다."}</p><div class="auth-tabs"><button class="auth-tab ${mode === "login" ? "active" : ""}" data-auth-tab="login">로그인</button><button class="auth-tab ${mode === "signup" ? "active" : ""}" data-auth-tab="signup">회원가입</button></div><form class="auth-form" id="authForm"><div class="auth-field ${mode === "signup" ? "" : "hidden"}"><label>이름</label><input name="name" placeholder="이름" ${mode === "signup" ? "required" : ""} /></div>${mode === "signup" ? `<div class="auth-field"><label>부서</label><input name="department" placeholder="예: NP MKT" required /></div><div class="auth-field"><label>연락처</label><input name="phone" placeholder="예: 010-0000-0000" required /></div><div class="auth-field"><label>업무 권한 선택</label><select name="roleRequest"><option value="requester">요청자</option><option value="buyer">Buyer 권한 요청</option></select><small>Buyer는 팀장·관리자 승인 후 적용됩니다.</small></div>` : ""}<div class="auth-field"><label>회사 이메일</label><input name="email" type="email" placeholder="name@company.com" required /></div><div class="auth-field"><label>비밀번호</label><input name="password" type="password" placeholder="비밀번호" minlength="6" required /></div>${mode === "signup" ? `<div class="auth-field"><label>비밀번호 확인</label><input name="passwordConfirm" type="password" placeholder="비밀번호 확인" minlength="6" required /></div>` : ""}<div class="auth-error">${esc(error)}</div><button class="btn btn-primary auth-submit">${mode === "login" ? "로그인" : "회원가입"}</button></form>${mode === "login" ? `<div class="auth-hint">${remote ? "기존 브라우저 로컬 계정은 사용할 수 없습니다. 회원가입에서 새 계정을 생성해 주세요." : "프로토타입 데모 계정: buyer@np-mkt.local / demo1234"}</div>` : `<div class="auth-hint">가입 즉시 요청자 권한으로 이용할 수 있으며, Buyer 선택은 승인 요청으로 기록됩니다.</div>`}</div></div>`;
   document.querySelectorAll("[data-auth-tab]").forEach((tab) => tab.addEventListener("click", () => renderAuth(tab.dataset.authTab)));
-  document.querySelector("#authForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.target); const email = String(form.get("email")).trim().toLowerCase(); const password = String(form.get("password")); try { if (mode === "login") { const user = remote ? await loginWithSupabase(email, password) : authState.users.find((item) => item.email === email && item.password === password); if (!user) throw new Error("이메일 또는 비밀번호를 확인해 주세요."); await completeLogin(remote ? user : { name: user.name, email: user.email, role: normalizedRole(user.role) }); return; } if (password !== String(form.get("passwordConfirm"))) throw new Error("비밀번호가 일치하지 않습니다."); if (!remote && authState.users.some((item) => item.email === email)) throw new Error("이미 등록된 이메일입니다."); const name = String(form.get("name")).trim(); const department = String(form.get("department") || "").trim(); const phone = String(form.get("phone") || "").trim(); const requestedRole = String(form.get("roleRequest")) === "buyer" ? "buyer" : "requester"; if (remote) { const user = await registerWithSupabase(name, email, password, requestedRole, department, phone); if (!user) { renderAuth("login", "가입은 완료됐습니다. 입력한 이메일과 비밀번호로 로그인해 주세요."); return; } await completeLogin(user); return; } const user = { name, email, password, department, phone, role: "requester" }; authState.users.push(user); await completeLogin(user); } catch (submitError) { renderAuth(mode, submitError.message || "인증 처리에 실패했습니다."); } });
+  if (mode === "signup") {
+    const form = document.querySelector("#authForm");
+    const emailField = form.querySelector("input[name='email']")?.closest(".auth-field");
+    const categoryField = document.createElement("div");
+    categoryField.className = "auth-field";
+    categoryField.innerHTML = `<label>희망 담당 카테고리 <small>Buyer 권한 요청 시 선택</small></label><div class="auth-category-options">${Object.keys(buyerMap).filter((value, index, list) => list.indexOf(value) === index).map((category) => `<label><input type="checkbox" name="requestedCategory" value="${esc(category)}" /> ${esc(category)}</label>`).join("")}</div>`;
+    emailField?.before(categoryField);
+  }
+  document.querySelector("#authForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.target); const email = String(form.get("email")).trim().toLowerCase(); const password = String(form.get("password")); try { if (mode === "login") { const user = remote ? await loginWithSupabase(email, password) : authState.users.find((item) => item.email === email && item.password === password); if (!user) throw new Error("이메일 또는 비밀번호를 확인해 주세요."); await completeLogin(remote ? user : { name: user.name, email: user.email, role: normalizedRole(user.role) }); return; } if (password !== String(form.get("passwordConfirm"))) throw new Error("비밀번호가 일치하지 않습니다."); if (!remote && authState.users.some((item) => item.email === email)) throw new Error("이미 등록된 이메일입니다."); const name = String(form.get("name")).trim(); const department = String(form.get("department") || "").trim(); const phone = String(form.get("phone") || "").trim(); const requestedRole = String(form.get("roleRequest")) === "buyer" ? "buyer" : "requester"; const requestedCategories = form.getAll("requestedCategory").map((value) => String(value)); if (requestedRole === "buyer" && !requestedCategories.length) throw new Error("Buyer 권한 요청 시 희망 담당 카테고리를 1개 이상 선택해 주세요."); if (remote) { const user = await registerWithSupabase(name, email, password, requestedRole, department, phone, requestedCategories); if (!user) { renderAuth("login", "가입은 완료됐습니다. 입력한 이메일과 비밀번호로 로그인해 주세요."); return; } await completeLogin(user); return; } const user = { name, email, password, department, phone, role: "requester" }; authState.users.push(user); await completeLogin(user); } catch (submitError) { renderAuth(mode, submitError.message || "인증 처리에 실패했습니다."); } });
 }
 let state = loadState();
 if (currentUser) state.role = normalizedRole(currentUser.role);
@@ -1545,6 +1564,18 @@ function enhanceCdImportQuality() {
   drawPoRows();
 }
 
+function notificationsView() {
+  if (!supabaseAuthEnabled()) return `<div class="page-head"><div><h1>알림 센터</h1><p>Supabase 인증 연결 후 알림을 확인할 수 있습니다.</p></div></div><div class="panel"><div class="empty">현재는 로컬 인증 모드입니다.</div></div>`;
+  if (notificationData.loading || !notificationData.loaded) return `<div class="page-head"><div><h1>알림 센터</h1><p>권한·승인 관련 알림을 불러오는 중입니다.</p></div></div><div class="panel"><div class="empty">알림을 불러오고 있습니다.</div></div>`;
+  const unread = notificationData.rows.filter((item) => !item.is_read).length;
+  return `<div class="page-head"><div><h1>알림 센터</h1><p>Buyer 권한 요청과 사용자 권한 변경 알림을 확인합니다.</p></div><div class="toolbar"><span class="status status-blue">읽지 않음 ${unread}건</span><button class="btn btn-secondary" id="notificationReload">새로고침</button>${unread ? `<button class="btn btn-primary" id="notificationReadAll">모두 읽음</button>` : ""}</div></div><section class="panel">${notificationData.error ? `<div class="empty">${esc(notificationData.error)}</div>` : notificationData.rows.length ? notificationData.rows.map((item) => `<div class="activity-item ${item.is_read ? "" : "notification-unread"}"><div class="activity-dot"></div><div><strong>${esc(item.title)}</strong><p>${esc(item.message || "-")} · ${item.created_at ? new Date(item.created_at).toLocaleString("ko-KR") : "-"}</p></div><span class="status ${item.is_read ? "status-mint" : "status-gold"}">${item.is_read ? "읽음" : "새 알림"}</span></div>`).join("") : `<div class="empty">수신한 알림이 없습니다.</div>`}</section>`;
+}
+
+function bindNotificationEvents() {
+  document.querySelector("#notificationReload")?.addEventListener("click", () => { notificationData.loaded = false; loadNotifications(); render(); });
+  document.querySelector("#notificationReadAll")?.addEventListener("click", async () => { try { await callAccessRpc("mark_my_notifications_read", { notification_ids: null }); notificationData.loaded = false; await loadNotifications(); toast("모든 알림을 읽음 처리했습니다."); } catch (error) { toast(error.message || "알림 처리에 실패했습니다."); } });
+}
+
 function profileView() {
   const profile = currentUser || {};
   const role = roles[normalizedRole(profile.role)] || roles.requester;
@@ -1591,6 +1622,28 @@ function accessCategoryAndAuditPanels() {
   const assignmentRows = accessData.assignments || [];
   const actionLabel = { profile_created: "계정 생성", role_changed: "역할 변경", status_changed: "상태 변경", category_assigned: "카테고리 배정", category_removed: "카테고리 해제", buyer_request_created: "Buyer 요청", buyer_request_reviewed: "Buyer 요청 검토", profile_updated: "프로필 수정" };
   return `<section class="panel"><div class="panel-head"><div><h2>Buyer 담당 카테고리</h2><span>카테고리가 없는 Buyer도 유지할 수 있습니다.</span></div></div><div class="access-assignment-form"><select id="assignmentBuyer"><option value="">Buyer 선택</option>${buyers.map((user) => `<option value="${user.id}">${esc(user.name)} · ${esc(user.department || "미입력")}</option>`).join("")}</select><select id="assignmentCategory"><option value="">대분류 선택</option>${categories.map((category) => `<option value="${esc(category)}">${esc(category)}</option>`).join("")}</select><input id="assignmentSmall" class="search" placeholder="소분류 (선택)"/><button class="btn btn-primary" id="assignmentAdd">배정</button></div>${assignmentRows.length ? `<div class="table-scroll"><table class="table"><thead><tr><th>Buyer</th><th>대분류</th><th>소분류</th><th>배정일</th><th>메모</th><th>해제</th></tr></thead><tbody>${assignmentRows.map((item) => `<tr><td>${esc(item.profiles?.name || "-")}</td><td>${esc(item.category_large || "-")}</td><td>${esc(item.category_small || "-")}</td><td>${item.assigned_at ? new Date(item.assigned_at).toLocaleDateString("ko-KR") : "-"}</td><td>${esc(item.note || "-")}</td><td><button class="btn btn-secondary assignment-remove" data-profile-id="${item.profile_id}" data-category-large="${esc(item.category_large)}" data-category-small="${esc(item.category_small || "")}">해제</button></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">등록된 Buyer 담당 카테고리가 없습니다.</div>`}</section><section class="panel"><div class="panel-head"><div><h2>권한 변경 이력</h2><span>최근 50건</span></div></div>${(accessData.audits || []).length ? `<div class="table-scroll"><table class="table"><thead><tr><th>일시</th><th>대상 사용자</th><th>변경 유형</th><th>사유</th></tr></thead><tbody>${accessData.audits.map((item) => `<tr><td>${item.occurred_at ? new Date(item.occurred_at).toLocaleString("ko-KR") : "-"}</td><td>${esc(item.profiles?.name || "-")}<br/><small>${esc(item.profiles?.email || "")}</small></td><td>${esc(actionLabel[item.action_type] || item.action_type)}</td><td>${esc(item.reason || "-")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">기록된 권한 변경 이력이 없습니다.</div>`}</section>`;
+}
+
+function accessUserDetailPanel() {
+  return `<section class="panel"><div class="panel-head"><div><h2>사용자 상세 조회</h2><span>권한·카테고리·요청·변경 이력을 함께 확인합니다.</span></div></div><div class="toolbar"><select id="accessDetailUser"><option value="">사용자 선택</option>${accessData.users.map((user) => `<option value="${user.id}">${esc(user.name)} · ${esc(user.email)}</option>`).join("")}</select></div><div id="accessDetailBody" class="empty">사용자를 선택해 주세요.</div></section>`;
+}
+
+function adIntegrationPanel() {
+  return `<section class="panel"><div class="panel-head"><div><h2>AD 연동 준비</h2><span>회사 정책 확정 전에는 이메일 기준의 수동 점검만 제공합니다.</span></div><span class="status status-blue">준비 단계</span></div><div class="notice">AD Object ID·최종 동기화 일시 필드는 준비되어 있습니다. 실제 AD 연결 권한과 동기화 API가 확정되면 이 화면에서 이메일 기준 계정 매칭 및 수동 동기화를 활성화합니다.</div><div class="action-row"><button class="btn btn-secondary" id="adSyncCheck">동기화 준비 상태 확인</button></div></section>`;
+}
+
+function bindAccessUserDetail() {
+  document.querySelector("#accessDetailUser")?.addEventListener("change", (event) => {
+    const userId = event.target.value;
+    const user = accessData.users.find((item) => item.id === userId);
+    const body = document.querySelector("#accessDetailBody");
+    if (!user || !body) return;
+    const categories = (accessData.assignments || []).filter((item) => item.profile_id === userId).map((item) => `${item.category_large}${item.category_small ? ` / ${item.category_small}` : ""}`);
+    const requests = (accessData.requests || []).filter((item) => item.requester_id === userId);
+    const audits = (accessData.audits || []).filter((item) => item.target_profile_id === userId).slice(0, 10);
+    body.className = "";
+    body.innerHTML = `<div class="info-grid" style="margin-top:14px"><div><span class="info-label">이름</span><span class="info-value">${esc(user.name || "-")}</span></div><div><span class="info-label">권한 / 상태</span><span class="info-value">${esc(user.role)} · ${user.is_active ? "활성" : "비활성"}</span></div><div><span class="info-label">부서</span><span class="info-value">${esc(user.department || "미입력")}</span></div><div><span class="info-label">연락처</span><span class="info-value">${esc(user.phone || "미입력")}</span></div></div><div class="notice" style="margin-top:14px"><strong>담당 카테고리:</strong> ${categories.length ? esc(categories.join(", ")) : "미배정"}<br/><strong>Buyer 권한 요청:</strong> ${requests.length ? esc(requests.map((item) => item.status).join(", ")) : "없음"}</div><div class="timeline" style="margin-top:14px">${audits.length ? audits.map((item) => `<div class="timeline-item"><div class="timeline-rail"></div><div><strong>${esc(item.action_type)}</strong><span>${item.occurred_at ? new Date(item.occurred_at).toLocaleString("ko-KR") : "-"} · ${esc(item.reason || "-")}</span></div></div>`).join("") : `<div class="empty">권한 변경 이력이 없습니다.</div>`}</div>`;
+  });
 }
 
 function bindAccessManagementEvents() {
@@ -1641,11 +1694,20 @@ render = function () {
     document.querySelector(".crumb").textContent = "NP MKT / 내 프로필";
     bindProfileEvents();
   }
+  if (state.view === "notifications") {
+    document.querySelector(".content").innerHTML = notificationsView();
+    document.querySelector(".crumb").textContent = "NP MKT / 알림 센터";
+    bindNotificationEvents();
+    if (!notificationData.loaded && !notificationData.loading) loadNotifications();
+  }
   if (state.view === "access") {
     document.querySelector(".content").innerHTML = accessManagementView();
     document.querySelector(".crumb").textContent = "NP MKT / 사용자 권한 관리";
-    if (accessData.loaded && !accessData.error) document.querySelector(".content")?.insertAdjacentHTML("beforeend", accessCategoryAndAuditPanels());
+    if (accessData.loaded && !accessData.error) document.querySelector(".content")?.insertAdjacentHTML("beforeend", accessCategoryAndAuditPanels() + accessUserDetailPanel());
     bindAccessManagementEvents();
+    bindAccessUserDetail();
+    document.querySelector(".content")?.insertAdjacentHTML("beforeend", adIntegrationPanel());
+    document.querySelector("#adSyncCheck")?.addEventListener("click", () => toast("AD 연동은 회사 정책 및 API 권한 확정 후 활성화할 수 있습니다."));
     if (!accessData.loaded && !accessData.loading) loadAccessData();
   }
   if (state.view === "imports") enhanceCdImportQuality();
@@ -1672,6 +1734,17 @@ render = function () {
       profileButton.className = state.view === "profile" ? "active" : "";
       profileButton.addEventListener("click", () => { state.view = "profile"; render(); });
       nav.appendChild(profileButton);
+    }
+  }
+  if (!document.querySelector("[data-view='notifications']")) {
+    const nav = document.querySelector(".nav");
+    if (nav) {
+      const notificationButton = document.createElement("button");
+      notificationButton.textContent = "●　알림 센터";
+      notificationButton.dataset.view = "notifications";
+      notificationButton.className = state.view === "notifications" ? "active" : "";
+      notificationButton.addEventListener("click", () => { state.view = "notifications"; render(); });
+      nav.appendChild(notificationButton);
     }
   }
   if (["lead", "admin"].includes(normalizedRole(currentUser?.role)) && !document.querySelector("[data-view='access']")) {
