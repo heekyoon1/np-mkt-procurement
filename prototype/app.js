@@ -35,7 +35,7 @@ const initialUsers = [{ name: "김희균", email: "buyer@np-mkt.local", password
 let authState = loadAuth();
 let currentUser = authState.currentUser;
 let authConfig = { configured: false };
-let accessData = { loaded: false, loading: false, users: [], requests: [], error: "" };
+let accessData = { loaded: false, loading: false, users: [], requests: [], assignments: [], audits: [], error: "" };
 function normalizedRole(value) { return ["requester", "lead", "buyer", "admin"].includes(value) ? value : "requester"; }
 function normalizeAuthState(saved) {
   const users = Array.isArray(saved?.users) ? saved.users.map((item) => ({
@@ -110,11 +110,13 @@ async function loadAccessData() {
   try {
     const session = JSON.parse(localStorage.getItem(SUPABASE_SESSION_KEY) || "null");
     const headers = { Authorization: `Bearer ${session.access_token}` };
-    const [users, requests] = await Promise.all([
+    const [users, requests, assignments, audits] = await Promise.all([
       supabaseAuthRequest("/rest/v1/profiles?select=id,name,email,department,phone,role,is_active,created_at,last_signed_in_at&order=created_at.desc", { headers }),
       supabaseAuthRequest("/rest/v1/buyer_role_requests?select=id,requester_id,requested_categories,request_note,status,created_at,review_note,profiles!buyer_role_requests_requester_id_fkey(name,email,department,phone,role)&order=created_at.desc", { headers }),
+      supabaseAuthRequest("/rest/v1/buyer_category_assignments?select=id,profile_id,category_large,category_small,assigned_at,note,profiles!buyer_category_assignments_profile_id_fkey(name,email)&unassigned_at=is.null&order=assigned_at.desc", { headers }),
+      supabaseAuthRequest("/rest/v1/user_access_audit_logs?select=id,target_profile_id,action_type,before_value,after_value,reason,occurred_at,profiles!user_access_audit_logs_target_profile_id_fkey(name,email)&order=occurred_at.desc&limit=50", { headers }),
     ]);
-    accessData = { loaded: true, loading: false, users: Array.isArray(users) ? users : [], requests: Array.isArray(requests) ? requests : [], error: "" };
+    accessData = { loaded: true, loading: false, users: Array.isArray(users) ? users : [], requests: Array.isArray(requests) ? requests : [], assignments: Array.isArray(assignments) ? assignments : [], audits: Array.isArray(audits) ? audits : [], error: "" };
   } catch (error) { accessData = { ...accessData, loading: false, error: error.message || "사용자 권한 정보를 불러오지 못했습니다." }; }
   if (state.view === "access") render();
 }
@@ -1583,6 +1585,14 @@ function accessManagementView() {
   return `<div class="page-head"><div><h1>사용자 권한 관리</h1><p>계정 상태, 역할, Buyer 권한 요청을 관리합니다.</p></div><button class="btn btn-secondary" id="accessReload">새로고침</button></div><div class="cards"><div class="metric"><div class="label">활성 사용자</div><div class="value">${accessData.users.filter((user) => user.is_active).length}</div><div class="note">전체 ${accessData.users.length}명</div></div><div class="metric"><div class="label">Buyer</div><div class="value">${accessData.users.filter((user) => user.role === "buyer" && user.is_active).length}</div><div class="note">카테고리 미배정 Buyer 포함</div></div><div class="metric"><div class="label">Buyer 권한 요청</div><div class="value">${pending.length}</div><div class="note">대기·보류 건</div></div></div><section class="panel"><div class="panel-head"><div><h2>Buyer 권한 요청</h2><span>승인 시 즉시 Buyer 권한으로 변경됩니다.</span></div></div>${pending.length ? `<div class="table-scroll"><table class="table"><thead><tr><th>요청자</th><th>부서</th><th>연락처</th><th>요청일</th><th>요청 메모</th><th>상태</th><th>처리</th></tr></thead><tbody>${pending.map((item) => `<tr><td><strong>${esc(item.profiles?.name || "-")}</strong><br/><small>${esc(item.profiles?.email || "")}</small></td><td>${esc(item.profiles?.department || "미입력")}</td><td>${esc(item.profiles?.phone || "미입력")}</td><td>${item.created_at ? new Date(item.created_at).toLocaleDateString("ko-KR") : "-"}</td><td>${esc(item.request_note || "-")}</td><td><span class="status ${item.status === "pending" ? "status-gold" : "status-blue"}">${status[item.status] || item.status}</span></td><td><div class="toolbar"><button class="btn btn-primary access-review" data-request-id="${item.id}" data-decision="approved">승인</button><button class="btn btn-danger access-review" data-request-id="${item.id}" data-decision="rejected">반려</button><button class="btn btn-secondary access-review" data-request-id="${item.id}" data-decision="on_hold">보류</button></div></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">처리할 Buyer 권한 요청이 없습니다.</div>`}</section><section class="panel"><div class="panel-head"><div><h2>사용자 목록</h2><span>팀장은 요청자·Buyer 범위만 변경할 수 있습니다.</span></div></div><div class="table-scroll"><table class="table"><thead><tr><th>사용자</th><th>부서 / 연락처</th><th>현재 역할</th><th>상태</th><th>가입일</th><th>권한 변경</th></tr></thead><tbody>${accessData.users.map((user) => { const isSelf = user.id === currentUser?.id; const leadRestricted = role === "lead" && !["requester", "buyer"].includes(user.role); const allowedRoles = role === "lead" ? ["requester", "buyer"] : ["requester", "buyer", "lead", "admin"]; return `<tr><td><strong>${esc(user.name || "-")}</strong><br/><small>${esc(user.email || "")}</small></td><td>${esc(user.department || "미입력")}<br/><small>${esc(user.phone || "미입력")}</small></td><td><span class="role-chip">${label[user.role] || user.role}</span></td><td><span class="status ${user.is_active ? "status-mint" : "status-red"}">${user.is_active ? "활성" : "비활성"}</span></td><td>${user.created_at ? new Date(user.created_at).toLocaleDateString("ko-KR") : "-"}</td><td>${isSelf || leadRestricted ? `<small>${isSelf ? "본인 계정은 변경할 수 없습니다." : "팀장 변경 범위 제외"}</small>` : `<div class="access-actions"><select class="access-role" data-user-id="${user.id}">${allowedRoles.map((value) => `<option value="${value}" ${user.role === value ? "selected" : ""}>${label[value]}</option>`).join("")}</select><select class="access-active" data-user-id="${user.id}"><option value="true" ${user.is_active ? "selected" : ""}>활성</option><option value="false" ${!user.is_active ? "selected" : ""}>비활성</option></select><button class="btn btn-secondary access-change" data-user-id="${user.id}">변경</button></div>`}</td></tr>`; }).join("")}</tbody></table></div></section>`;
 }
 
+function accessCategoryAndAuditPanels() {
+  const categories = [...new Set([...Object.keys(buyerMap), ...(state.cdTransactions || []).map((row) => canonicalBuyerCategory(row.categoryLarge)).filter(Boolean)])].sort((a, b) => a.localeCompare(b, "ko"));
+  const buyers = accessData.users.filter((user) => user.role === "buyer" && user.is_active);
+  const assignmentRows = accessData.assignments || [];
+  const actionLabel = { profile_created: "계정 생성", role_changed: "역할 변경", status_changed: "상태 변경", category_assigned: "카테고리 배정", category_removed: "카테고리 해제", buyer_request_created: "Buyer 요청", buyer_request_reviewed: "Buyer 요청 검토", profile_updated: "프로필 수정" };
+  return `<section class="panel"><div class="panel-head"><div><h2>Buyer 담당 카테고리</h2><span>카테고리가 없는 Buyer도 유지할 수 있습니다.</span></div></div><div class="access-assignment-form"><select id="assignmentBuyer"><option value="">Buyer 선택</option>${buyers.map((user) => `<option value="${user.id}">${esc(user.name)} · ${esc(user.department || "미입력")}</option>`).join("")}</select><select id="assignmentCategory"><option value="">대분류 선택</option>${categories.map((category) => `<option value="${esc(category)}">${esc(category)}</option>`).join("")}</select><input id="assignmentSmall" class="search" placeholder="소분류 (선택)"/><button class="btn btn-primary" id="assignmentAdd">배정</button></div>${assignmentRows.length ? `<div class="table-scroll"><table class="table"><thead><tr><th>Buyer</th><th>대분류</th><th>소분류</th><th>배정일</th><th>메모</th><th>해제</th></tr></thead><tbody>${assignmentRows.map((item) => `<tr><td>${esc(item.profiles?.name || "-")}</td><td>${esc(item.category_large || "-")}</td><td>${esc(item.category_small || "-")}</td><td>${item.assigned_at ? new Date(item.assigned_at).toLocaleDateString("ko-KR") : "-"}</td><td>${esc(item.note || "-")}</td><td><button class="btn btn-secondary assignment-remove" data-profile-id="${item.profile_id}" data-category-large="${esc(item.category_large)}" data-category-small="${esc(item.category_small || "")}">해제</button></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">등록된 Buyer 담당 카테고리가 없습니다.</div>`}</section><section class="panel"><div class="panel-head"><div><h2>권한 변경 이력</h2><span>최근 50건</span></div></div>${(accessData.audits || []).length ? `<div class="table-scroll"><table class="table"><thead><tr><th>일시</th><th>대상 사용자</th><th>변경 유형</th><th>사유</th></tr></thead><tbody>${accessData.audits.map((item) => `<tr><td>${item.occurred_at ? new Date(item.occurred_at).toLocaleString("ko-KR") : "-"}</td><td>${esc(item.profiles?.name || "-")}<br/><small>${esc(item.profiles?.email || "")}</small></td><td>${esc(actionLabel[item.action_type] || item.action_type)}</td><td>${esc(item.reason || "-")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">기록된 권한 변경 이력이 없습니다.</div>`}</section>`;
+}
+
 function bindAccessManagementEvents() {
   document.querySelector("#accessReload")?.addEventListener("click", () => { accessData.loaded = false; loadAccessData(); render(); });
   document.querySelectorAll(".access-review").forEach((button) => button.addEventListener("click", async () => {
@@ -1602,6 +1612,22 @@ function bindAccessManagementEvents() {
     try { await callAccessRpc("change_user_access", { target_id: id, next_role: role, next_is_active: isActive, change_reason: reason }); accessData.loaded = false; await loadAccessData(); toast("사용자 권한을 변경했습니다."); }
     catch (error) { toast(error.message || "사용자 권한 변경에 실패했습니다."); }
   }));
+  document.querySelector("#assignmentAdd")?.addEventListener("click", async () => {
+    const profileId = document.querySelector("#assignmentBuyer")?.value;
+    const categoryLarge = document.querySelector("#assignmentCategory")?.value;
+    const categorySmall = document.querySelector("#assignmentSmall")?.value || null;
+    if (!profileId || !categoryLarge) { toast("Buyer와 대분류를 선택해 주세요."); return; }
+    const reason = window.prompt("카테고리 배정 사유를 입력해 주세요.");
+    if (reason === null) return;
+    try { await callAccessRpc("set_buyer_category_assignment", { target_profile_id: profileId, next_category_large: categoryLarge, next_category_small: categorySmall, assign: true, change_reason: reason }); accessData.loaded = false; await loadAccessData(); toast("Buyer 담당 카테고리를 배정했습니다."); }
+    catch (error) { toast(error.message || "카테고리 배정에 실패했습니다."); }
+  });
+  document.querySelectorAll(".assignment-remove").forEach((button) => button.addEventListener("click", async () => {
+    const reason = window.prompt("카테고리 해제 사유를 입력해 주세요.");
+    if (reason === null) return;
+    try { await callAccessRpc("set_buyer_category_assignment", { target_profile_id: button.dataset.profileId, next_category_large: button.dataset.categoryLarge, next_category_small: button.dataset.categorySmall || null, assign: false, change_reason: reason }); accessData.loaded = false; await loadAccessData(); toast("Buyer 담당 카테고리를 해제했습니다."); }
+    catch (error) { toast(error.message || "카테고리 해제에 실패했습니다."); }
+  }));
 }
 
 const originalRender = render;
@@ -1618,6 +1644,7 @@ render = function () {
   if (state.view === "access") {
     document.querySelector(".content").innerHTML = accessManagementView();
     document.querySelector(".crumb").textContent = "NP MKT / 사용자 권한 관리";
+    if (accessData.loaded && !accessData.error) document.querySelector(".content")?.insertAdjacentHTML("beforeend", accessCategoryAndAuditPanels());
     bindAccessManagementEvents();
     if (!accessData.loaded && !accessData.loading) loadAccessData();
   }
