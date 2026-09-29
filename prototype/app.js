@@ -63,13 +63,13 @@ async function supabaseAuthRequest(path, options = {}) {
 async function profileForSession(session) {
   const userId = session?.user?.id;
   if (!userId || !session?.access_token) throw new Error("로그인 세션이 올바르지 않습니다.");
-  const rows = await supabaseAuthRequest(`/rest/v1/profiles?select=id,name,email,role,is_active&id=eq.${encodeURIComponent(userId)}`, {
+  const rows = await supabaseAuthRequest(`/rest/v1/profiles?select=id,name,email,department,phone,role,is_active,created_at,last_signed_in_at&id=eq.${encodeURIComponent(userId)}`, {
     headers: { Authorization: `Bearer ${session.access_token}` },
   });
   const profile = Array.isArray(rows) ? rows[0] : null;
   if (!profile) throw new Error("사용자 프로필을 찾을 수 없습니다. 잠시 후 다시 로그인해 주세요.");
   if (profile.is_active === false) throw new Error("비활성화된 계정입니다. 관리자에게 문의해 주세요.");
-  return { name: profile.name || session.user.email, email: profile.email || session.user.email, role: normalizedRole(profile.role) };
+  return { id: profile.id, name: profile.name || session.user.email, email: profile.email || session.user.email, department: profile.department || "미입력", phone: profile.phone || "미입력", role: normalizedRole(profile.role), createdAt: profile.created_at, lastSignedInAt: profile.last_signed_in_at };
 }
 function saveSupabaseSession(session) { localStorage.setItem(SUPABASE_SESSION_KEY, JSON.stringify(session)); }
 function clearSupabaseSession() { localStorage.removeItem(SUPABASE_SESSION_KEY); }
@@ -79,12 +79,24 @@ async function loginWithSupabase(email, password) {
   saveSupabaseSession(session);
   return profile;
 }
-async function registerWithSupabase(name, email, password, requestedRole = "requester") {
-  const result = await supabaseAuthRequest("/auth/v1/signup", { method: "POST", body: JSON.stringify({ email, password, data: { name, requested_role: requestedRole } }) });
+async function registerWithSupabase(name, email, password, requestedRole = "requester", department = "", phone = "") {
+  const result = await supabaseAuthRequest("/auth/v1/signup", { method: "POST", body: JSON.stringify({ email, password, data: { name, requested_role: requestedRole, department, phone } }) });
   if (!result.session) return null;
   const profile = await profileForSession(result.session);
   saveSupabaseSession(result.session);
   return profile;
+}
+async function updateOwnProfile({ name, department, phone }) {
+  const session = JSON.parse(localStorage.getItem(SUPABASE_SESSION_KEY) || "null");
+  if (!session?.access_token || !currentUser?.id) throw new Error("로그인 세션이 만료되었습니다. 다시 로그인해 주세요.");
+  const rows = await supabaseAuthRequest("/rest/v1/rpc/update_my_profile", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${session.access_token}`, Prefer: "return=representation" },
+    body: JSON.stringify({ next_name: name, next_department: department, next_phone: phone }),
+  });
+  const profile = Array.isArray(rows) ? rows[0] : null;
+  if (!profile) throw new Error("프로필을 저장하지 못했습니다.");
+  return { ...currentUser, name: profile.name, department: profile.department, phone: profile.phone };
 }
 async function bootstrapAuth() {
   try {
@@ -112,9 +124,9 @@ async function completeLogin(user) {
 }
 function renderAuth(mode = "login", error = "") {
   const remote = supabaseAuthEnabled();
-  document.querySelector("#app").innerHTML = `<div class="auth-shell"><div class="auth-card"><div class="auth-brand"><div class="brand-mark">NP</div><div><strong>NP MKT</strong><span>구매업무 통합시스템</span></div></div><h1>${mode === "login" ? "로그인" : "회원가입"}</h1><p>${remote ? "Supabase 인증 기반으로 계정을 확인합니다." : "개발용 로컬 계정으로 로그인합니다."}</p><div class="auth-tabs"><button class="auth-tab ${mode === "login" ? "active" : ""}" data-auth-tab="login">로그인</button><button class="auth-tab ${mode === "signup" ? "active" : ""}" data-auth-tab="signup">회원가입</button></div><form class="auth-form" id="authForm"><div class="auth-field ${mode === "signup" ? "" : "hidden"}"><label>이름</label><input name="name" placeholder="이름" ${mode === "signup" ? "required" : ""} /></div>${mode === "signup" ? `<div class="auth-field"><label>업무 권한 선택</label><select name="roleRequest"><option value="requester">요청자</option><option value="buyer">Buyer 권한 요청</option></select><small>Buyer는 팀장·관리자 승인 후 적용됩니다.</small></div>` : ""}<div class="auth-field"><label>회사 이메일</label><input name="email" type="email" placeholder="name@company.com" required /></div><div class="auth-field"><label>비밀번호</label><input name="password" type="password" placeholder="비밀번호" minlength="6" required /></div>${mode === "signup" ? `<div class="auth-field"><label>비밀번호 확인</label><input name="passwordConfirm" type="password" placeholder="비밀번호 확인" minlength="6" required /></div>` : ""}<div class="auth-error">${esc(error)}</div><button class="btn btn-primary auth-submit">${mode === "login" ? "로그인" : "회원가입"}</button></form>${mode === "login" ? `<div class="auth-hint">${remote ? "기존 브라우저 로컬 계정은 사용할 수 없습니다. 회원가입에서 새 계정을 생성해 주세요." : "프로토타입 데모 계정: buyer@np-mkt.local / demo1234"}</div>` : `<div class="auth-hint">요청자는 즉시 이용할 수 있으며, Buyer 선택은 승인 요청으로 기록됩니다.</div>`}</div></div>`;
+  document.querySelector("#app").innerHTML = `<div class="auth-shell"><div class="auth-card"><div class="auth-brand"><div class="brand-mark">NP</div><div><strong>NP MKT</strong><span>구매업무 통합시스템</span></div></div><h1>${mode === "login" ? "로그인" : "회원가입"}</h1><p>${remote ? "Supabase 인증 기반으로 계정을 확인합니다." : "개발용 로컬 계정으로 로그인합니다."}</p><div class="auth-tabs"><button class="auth-tab ${mode === "login" ? "active" : ""}" data-auth-tab="login">로그인</button><button class="auth-tab ${mode === "signup" ? "active" : ""}" data-auth-tab="signup">회원가입</button></div><form class="auth-form" id="authForm"><div class="auth-field ${mode === "signup" ? "" : "hidden"}"><label>이름</label><input name="name" placeholder="이름" ${mode === "signup" ? "required" : ""} /></div>${mode === "signup" ? `<div class="auth-field"><label>부서</label><input name="department" placeholder="예: NP MKT" required /></div><div class="auth-field"><label>연락처</label><input name="phone" placeholder="예: 010-0000-0000" required /></div><div class="auth-field"><label>업무 권한 선택</label><select name="roleRequest"><option value="requester">요청자</option><option value="buyer">Buyer 권한 요청</option></select><small>Buyer는 팀장·관리자 승인 후 적용됩니다.</small></div>` : ""}<div class="auth-field"><label>회사 이메일</label><input name="email" type="email" placeholder="name@company.com" required /></div><div class="auth-field"><label>비밀번호</label><input name="password" type="password" placeholder="비밀번호" minlength="6" required /></div>${mode === "signup" ? `<div class="auth-field"><label>비밀번호 확인</label><input name="passwordConfirm" type="password" placeholder="비밀번호 확인" minlength="6" required /></div>` : ""}<div class="auth-error">${esc(error)}</div><button class="btn btn-primary auth-submit">${mode === "login" ? "로그인" : "회원가입"}</button></form>${mode === "login" ? `<div class="auth-hint">${remote ? "기존 브라우저 로컬 계정은 사용할 수 없습니다. 회원가입에서 새 계정을 생성해 주세요." : "프로토타입 데모 계정: buyer@np-mkt.local / demo1234"}</div>` : `<div class="auth-hint">가입 즉시 요청자 권한으로 이용할 수 있으며, Buyer 선택은 승인 요청으로 기록됩니다.</div>`}</div></div>`;
   document.querySelectorAll("[data-auth-tab]").forEach((tab) => tab.addEventListener("click", () => renderAuth(tab.dataset.authTab)));
-  document.querySelector("#authForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.target); const email = String(form.get("email")).trim().toLowerCase(); const password = String(form.get("password")); try { if (mode === "login") { const user = remote ? await loginWithSupabase(email, password) : authState.users.find((item) => item.email === email && item.password === password); if (!user) throw new Error("이메일 또는 비밀번호를 확인해 주세요."); await completeLogin({ name: user.name, email: user.email, role: normalizedRole(user.role) }); return; } if (password !== String(form.get("passwordConfirm"))) throw new Error("비밀번호가 일치하지 않습니다."); if (!remote && authState.users.some((item) => item.email === email)) throw new Error("이미 등록된 이메일입니다."); const name = String(form.get("name")).trim(); const requestedRole = String(form.get("roleRequest")) === "buyer" ? "buyer" : "requester"; if (remote) { const user = await registerWithSupabase(name, email, password, requestedRole); if (!user) { renderAuth("login", "가입은 완료됐습니다. 입력한 이메일과 비밀번호로 로그인해 주세요."); return; } await completeLogin(user); return; } const user = { name, email, password, role: "requester" }; authState.users.push(user); await completeLogin(user); } catch (submitError) { renderAuth(mode, submitError.message || "인증 처리에 실패했습니다."); } });
+  document.querySelector("#authForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.target); const email = String(form.get("email")).trim().toLowerCase(); const password = String(form.get("password")); try { if (mode === "login") { const user = remote ? await loginWithSupabase(email, password) : authState.users.find((item) => item.email === email && item.password === password); if (!user) throw new Error("이메일 또는 비밀번호를 확인해 주세요."); await completeLogin({ name: user.name, email: user.email, role: normalizedRole(user.role) }); return; } if (password !== String(form.get("passwordConfirm"))) throw new Error("비밀번호가 일치하지 않습니다."); if (!remote && authState.users.some((item) => item.email === email)) throw new Error("이미 등록된 이메일입니다."); const name = String(form.get("name")).trim(); const department = String(form.get("department") || "").trim(); const phone = String(form.get("phone") || "").trim(); const requestedRole = String(form.get("roleRequest")) === "buyer" ? "buyer" : "requester"; if (remote) { const user = await registerWithSupabase(name, email, password, requestedRole, department, phone); if (!user) { renderAuth("login", "가입은 완료됐습니다. 입력한 이메일과 비밀번호로 로그인해 주세요."); return; } await completeLogin(user); return; } const user = { name, email, password, department, phone, role: "requester" }; authState.users.push(user); await completeLogin(user); } catch (submitError) { renderAuth(mode, submitError.message || "인증 처리에 실패했습니다."); } });
 }
 let state = loadState();
 if (currentUser) state.role = normalizedRole(currentUser.role);
@@ -1511,12 +1523,45 @@ function enhanceCdImportQuality() {
   drawPoRows();
 }
 
+function profileView() {
+  const profile = currentUser || {};
+  const role = roles[normalizedRole(profile.role)] || roles.requester;
+  const remote = supabaseAuthEnabled();
+  const joined = profile.createdAt ? new Date(profile.createdAt).toLocaleDateString("ko-KR") : "-";
+  const lastSignedIn = profile.lastSignedInAt ? new Date(profile.lastSignedInAt).toLocaleString("ko-KR") : "현재 세션";
+  return `<div class="page-head"><div><h1>내 프로필</h1><p>개인 기본 정보를 관리하고 현재 부여된 업무 권한을 확인합니다.</p></div><span class="status status-mint">활성 계정</span></div><div class="profile-grid"><section class="panel profile-summary"><div class="profile-avatar-large">${esc((profile.name || "NP").slice(0, 2))}</div><h2>${esc(profile.name || "이름 미입력")}</h2><p>${esc(profile.email || "-")}</p><span class="role-chip">${esc(role.label)}</span><dl><div><dt>가입일</dt><dd>${joined}</dd></div><div><dt>최근 로그인</dt><dd>${lastSignedIn}</dd></div><div><dt>인증 방식</dt><dd>${remote ? "Supabase 계정" : "로컬 데모 계정"}</dd></div></dl></section><section class="panel"><div class="panel-head"><div><h2>기본 정보</h2><span>이름·부서·연락처만 본인이 수정할 수 있습니다.</span></div></div><form id="profileForm" class="form-grid profile-form"><div class="field"><label>이름</label><input name="name" required value="${esc(profile.name || "")}" /></div><div class="field"><label>회사 이메일</label><input value="${esc(profile.email || "")}" readonly /></div><div class="field"><label>부서</label><input name="department" required value="${esc(profile.department || "")}" placeholder="예: NP MKT" /></div><div class="field"><label>연락처</label><input name="phone" required value="${esc(profile.phone || "")}" placeholder="예: 010-0000-0000" /></div><div class="field full"><label>권한 안내</label><div class="notice">현재 권한: <strong>${esc(role.label)}</strong>${normalizedRole(profile.role) === "requester" ? " · Buyer 권한이 필요하면 사용자 권한 관리 메뉴에서 요청할 수 있습니다." : " · 권한 변경은 팀장 또는 관리자가 처리합니다."}</div></div><div class="action-row"><button class="btn btn-primary" type="submit">기본 정보 저장</button></div></form></section></div>`;
+}
+
+function bindProfileEvents() {
+  document.querySelector("#profileForm")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.target);
+    const name = String(form.get("name") || "").trim();
+    const department = String(form.get("department") || "").trim();
+    const phone = String(form.get("phone") || "").trim();
+    if (!name || !department || !phone) { toast("이름·부서·연락처를 모두 입력해 주세요."); return; }
+    try {
+      if (supabaseAuthEnabled()) currentUser = await updateOwnProfile({ name, department, phone });
+      else currentUser = { ...currentUser, name, department, phone };
+      authState.currentUser = currentUser;
+      saveAuth();
+      render();
+      toast("기본 정보를 저장했습니다.");
+    } catch (error) { toast(error.message || "프로필 저장에 실패했습니다."); }
+  });
+}
+
 const originalRender = render;
 render = function () {
   if (!currentUser) { renderAuth(); return; }
   state.role = normalizedRole(currentUser.role);
   state.requests.forEach((request) => request.history.forEach((history) => { if (history.actor === "김진영") history.actor = roles.lead.name; }));
   originalRender();
+  if (state.view === "profile") {
+    document.querySelector(".content").innerHTML = profileView();
+    document.querySelector(".crumb").textContent = "NP MKT / 내 프로필";
+    bindProfileEvents();
+  }
   if (state.view === "imports") enhanceCdImportQuality();
   if (state.view === "detail") enhancePurchaseOrderTracking();
   if (state.view === "dashboard") { document.querySelectorAll("[data-dashboard-step]").forEach((step) => step.addEventListener("click", () => { const status = statusSteps[Number(step.dataset.dashboardStep)]; state.view = "requests"; render(); filterDashboardRequestsByStatus(status); })); }
@@ -1532,6 +1577,17 @@ render = function () {
   if (topActions && !topActions.querySelector("[data-auth-logout]")) { const logout = document.createElement("button"); logout.className = "logout-btn"; logout.dataset.authLogout = "true"; logout.textContent = "로그아웃"; logout.addEventListener("click", async () => { try { const session = JSON.parse(localStorage.getItem(SUPABASE_SESSION_KEY) || "null"); if (supabaseAuthEnabled() && session?.access_token) await supabaseAuthRequest("/auth/v1/logout", { method: "POST", headers: { Authorization: `Bearer ${session.access_token}` } }); } catch {} clearSupabaseSession(); currentUser = null; authState.currentUser = null; saveAuth(); render(); }); topActions.appendChild(logout); }
   renderCategoryPurchaseSummary();
   renderBuyerPurchaseSummary();
+  if (!document.querySelector("[data-view='profile']")) {
+    const nav = document.querySelector(".nav");
+    if (nav) {
+      const profileButton = document.createElement("button");
+      profileButton.textContent = "◉　내 프로필";
+      profileButton.dataset.view = "profile";
+      profileButton.className = state.view === "profile" ? "active" : "";
+      profileButton.addEventListener("click", () => { state.view = "profile"; render(); });
+      nav.appendChild(profileButton);
+    }
+  }
   if (!document.querySelector("[data-view='history']")) { const nav = document.querySelector(".nav"); if (nav) { const history = document.createElement("button"); history.textContent = "⌁　구매 이력"; history.dataset.view = "history"; history.className = state.view === "history" ? "active" : ""; history.addEventListener("click", () => { state.view = "history"; render(); }); nav.appendChild(history); } }
 };
 
