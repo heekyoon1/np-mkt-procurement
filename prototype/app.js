@@ -35,6 +35,7 @@ const initialUsers = [{ name: "김희균", email: "buyer@np-mkt.local", password
 let authState = loadAuth();
 let currentUser = authState.currentUser;
 let authConfig = { configured: false };
+let accessData = { loaded: false, loading: false, users: [], requests: [], error: "" };
 function normalizedRole(value) { return ["requester", "lead", "buyer", "admin"].includes(value) ? value : "requester"; }
 function normalizeAuthState(saved) {
   const users = Array.isArray(saved?.users) ? saved.users.map((item) => ({
@@ -98,6 +99,25 @@ async function updateOwnProfile({ name, department, phone }) {
   if (!profile) throw new Error("프로필을 저장하지 못했습니다.");
   return { ...currentUser, name: profile.name, department: profile.department, phone: profile.phone };
 }
+async function callAccessRpc(name, body) {
+  const session = JSON.parse(localStorage.getItem(SUPABASE_SESSION_KEY) || "null");
+  if (!session?.access_token) throw new Error("로그인 세션이 만료되었습니다. 다시 로그인해 주세요.");
+  return supabaseAuthRequest(`/rest/v1/rpc/${name}`, { method: "POST", headers: { Authorization: `Bearer ${session.access_token}` }, body: JSON.stringify(body) });
+}
+async function loadAccessData() {
+  if (!supabaseAuthEnabled() || !["lead", "admin"].includes(normalizedRole(currentUser?.role)) || accessData.loading) return;
+  accessData.loading = true; accessData.error = "";
+  try {
+    const session = JSON.parse(localStorage.getItem(SUPABASE_SESSION_KEY) || "null");
+    const headers = { Authorization: `Bearer ${session.access_token}` };
+    const [users, requests] = await Promise.all([
+      supabaseAuthRequest("/rest/v1/profiles?select=id,name,email,department,phone,role,is_active,created_at,last_signed_in_at&order=created_at.desc", { headers }),
+      supabaseAuthRequest("/rest/v1/buyer_role_requests?select=id,requester_id,requested_categories,request_note,status,created_at,review_note,profiles!buyer_role_requests_requester_id_fkey(name,email,department,phone,role)&order=created_at.desc", { headers }),
+    ]);
+    accessData = { loaded: true, loading: false, users: Array.isArray(users) ? users : [], requests: Array.isArray(requests) ? requests : [], error: "" };
+  } catch (error) { accessData = { ...accessData, loading: false, error: error.message || "사용자 권한 정보를 불러오지 못했습니다." }; }
+  if (state.view === "access") render();
+}
 async function bootstrapAuth() {
   try {
     const response = await fetch("/api/auth-config", { cache: "no-store" });
@@ -126,7 +146,7 @@ function renderAuth(mode = "login", error = "") {
   const remote = supabaseAuthEnabled();
   document.querySelector("#app").innerHTML = `<div class="auth-shell"><div class="auth-card"><div class="auth-brand"><div class="brand-mark">NP</div><div><strong>NP MKT</strong><span>구매업무 통합시스템</span></div></div><h1>${mode === "login" ? "로그인" : "회원가입"}</h1><p>${remote ? "Supabase 인증 기반으로 계정을 확인합니다." : "개발용 로컬 계정으로 로그인합니다."}</p><div class="auth-tabs"><button class="auth-tab ${mode === "login" ? "active" : ""}" data-auth-tab="login">로그인</button><button class="auth-tab ${mode === "signup" ? "active" : ""}" data-auth-tab="signup">회원가입</button></div><form class="auth-form" id="authForm"><div class="auth-field ${mode === "signup" ? "" : "hidden"}"><label>이름</label><input name="name" placeholder="이름" ${mode === "signup" ? "required" : ""} /></div>${mode === "signup" ? `<div class="auth-field"><label>부서</label><input name="department" placeholder="예: NP MKT" required /></div><div class="auth-field"><label>연락처</label><input name="phone" placeholder="예: 010-0000-0000" required /></div><div class="auth-field"><label>업무 권한 선택</label><select name="roleRequest"><option value="requester">요청자</option><option value="buyer">Buyer 권한 요청</option></select><small>Buyer는 팀장·관리자 승인 후 적용됩니다.</small></div>` : ""}<div class="auth-field"><label>회사 이메일</label><input name="email" type="email" placeholder="name@company.com" required /></div><div class="auth-field"><label>비밀번호</label><input name="password" type="password" placeholder="비밀번호" minlength="6" required /></div>${mode === "signup" ? `<div class="auth-field"><label>비밀번호 확인</label><input name="passwordConfirm" type="password" placeholder="비밀번호 확인" minlength="6" required /></div>` : ""}<div class="auth-error">${esc(error)}</div><button class="btn btn-primary auth-submit">${mode === "login" ? "로그인" : "회원가입"}</button></form>${mode === "login" ? `<div class="auth-hint">${remote ? "기존 브라우저 로컬 계정은 사용할 수 없습니다. 회원가입에서 새 계정을 생성해 주세요." : "프로토타입 데모 계정: buyer@np-mkt.local / demo1234"}</div>` : `<div class="auth-hint">가입 즉시 요청자 권한으로 이용할 수 있으며, Buyer 선택은 승인 요청으로 기록됩니다.</div>`}</div></div>`;
   document.querySelectorAll("[data-auth-tab]").forEach((tab) => tab.addEventListener("click", () => renderAuth(tab.dataset.authTab)));
-  document.querySelector("#authForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.target); const email = String(form.get("email")).trim().toLowerCase(); const password = String(form.get("password")); try { if (mode === "login") { const user = remote ? await loginWithSupabase(email, password) : authState.users.find((item) => item.email === email && item.password === password); if (!user) throw new Error("이메일 또는 비밀번호를 확인해 주세요."); await completeLogin({ name: user.name, email: user.email, role: normalizedRole(user.role) }); return; } if (password !== String(form.get("passwordConfirm"))) throw new Error("비밀번호가 일치하지 않습니다."); if (!remote && authState.users.some((item) => item.email === email)) throw new Error("이미 등록된 이메일입니다."); const name = String(form.get("name")).trim(); const department = String(form.get("department") || "").trim(); const phone = String(form.get("phone") || "").trim(); const requestedRole = String(form.get("roleRequest")) === "buyer" ? "buyer" : "requester"; if (remote) { const user = await registerWithSupabase(name, email, password, requestedRole, department, phone); if (!user) { renderAuth("login", "가입은 완료됐습니다. 입력한 이메일과 비밀번호로 로그인해 주세요."); return; } await completeLogin(user); return; } const user = { name, email, password, department, phone, role: "requester" }; authState.users.push(user); await completeLogin(user); } catch (submitError) { renderAuth(mode, submitError.message || "인증 처리에 실패했습니다."); } });
+  document.querySelector("#authForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.target); const email = String(form.get("email")).trim().toLowerCase(); const password = String(form.get("password")); try { if (mode === "login") { const user = remote ? await loginWithSupabase(email, password) : authState.users.find((item) => item.email === email && item.password === password); if (!user) throw new Error("이메일 또는 비밀번호를 확인해 주세요."); await completeLogin(remote ? user : { name: user.name, email: user.email, role: normalizedRole(user.role) }); return; } if (password !== String(form.get("passwordConfirm"))) throw new Error("비밀번호가 일치하지 않습니다."); if (!remote && authState.users.some((item) => item.email === email)) throw new Error("이미 등록된 이메일입니다."); const name = String(form.get("name")).trim(); const department = String(form.get("department") || "").trim(); const phone = String(form.get("phone") || "").trim(); const requestedRole = String(form.get("roleRequest")) === "buyer" ? "buyer" : "requester"; if (remote) { const user = await registerWithSupabase(name, email, password, requestedRole, department, phone); if (!user) { renderAuth("login", "가입은 완료됐습니다. 입력한 이메일과 비밀번호로 로그인해 주세요."); return; } await completeLogin(user); return; } const user = { name, email, password, department, phone, role: "requester" }; authState.users.push(user); await completeLogin(user); } catch (submitError) { renderAuth(mode, submitError.message || "인증 처리에 실패했습니다."); } });
 }
 let state = loadState();
 if (currentUser) state.role = normalizedRole(currentUser.role);
@@ -1551,6 +1571,39 @@ function bindProfileEvents() {
   });
 }
 
+function accessManagementView() {
+  const role = normalizedRole(currentUser?.role);
+  if (!["lead", "admin"].includes(role)) return `<div class="page-head"><div><h1>사용자 권한 관리</h1><p>팀장 또는 관리자만 접근할 수 있습니다.</p></div></div><div class="panel"><div class="empty">접근 권한이 없습니다.</div></div>`;
+  if (!supabaseAuthEnabled()) return `<div class="page-head"><div><h1>사용자 권한 관리</h1><p>Supabase 인증 연결 후 사용할 수 있습니다.</p></div></div><div class="panel"><div class="empty">현재는 로컬 인증 모드입니다.</div></div>`;
+  if (accessData.loading || !accessData.loaded) return `<div class="page-head"><div><h1>사용자 권한 관리</h1><p>계정과 Buyer 권한 요청을 불러오는 중입니다.</p></div></div><div class="panel"><div class="empty">사용자 권한 정보를 불러오고 있습니다.</div></div>`;
+  if (accessData.error) return `<div class="page-head"><div><h1>사용자 권한 관리</h1><p>계정과 Buyer 권한 요청을 관리합니다.</p></div><button class="btn btn-secondary" id="accessReload">다시 조회</button></div><div class="panel"><div class="empty">${esc(accessData.error)}</div></div>`;
+  const pending = accessData.requests.filter((item) => ["pending", "on_hold"].includes(item.status));
+  const label = { requester: "요청자", buyer: "Buyer", lead: "팀장", admin: "관리자" };
+  const status = { pending: "대기", approved: "승인", rejected: "반려", on_hold: "보류", cancelled: "취소" };
+  return `<div class="page-head"><div><h1>사용자 권한 관리</h1><p>계정 상태, 역할, Buyer 권한 요청을 관리합니다.</p></div><button class="btn btn-secondary" id="accessReload">새로고침</button></div><div class="cards"><div class="metric"><div class="label">활성 사용자</div><div class="value">${accessData.users.filter((user) => user.is_active).length}</div><div class="note">전체 ${accessData.users.length}명</div></div><div class="metric"><div class="label">Buyer</div><div class="value">${accessData.users.filter((user) => user.role === "buyer" && user.is_active).length}</div><div class="note">카테고리 미배정 Buyer 포함</div></div><div class="metric"><div class="label">Buyer 권한 요청</div><div class="value">${pending.length}</div><div class="note">대기·보류 건</div></div></div><section class="panel"><div class="panel-head"><div><h2>Buyer 권한 요청</h2><span>승인 시 즉시 Buyer 권한으로 변경됩니다.</span></div></div>${pending.length ? `<div class="table-scroll"><table class="table"><thead><tr><th>요청자</th><th>부서</th><th>연락처</th><th>요청일</th><th>요청 메모</th><th>상태</th><th>처리</th></tr></thead><tbody>${pending.map((item) => `<tr><td><strong>${esc(item.profiles?.name || "-")}</strong><br/><small>${esc(item.profiles?.email || "")}</small></td><td>${esc(item.profiles?.department || "미입력")}</td><td>${esc(item.profiles?.phone || "미입력")}</td><td>${item.created_at ? new Date(item.created_at).toLocaleDateString("ko-KR") : "-"}</td><td>${esc(item.request_note || "-")}</td><td><span class="status ${item.status === "pending" ? "status-gold" : "status-blue"}">${status[item.status] || item.status}</span></td><td><div class="toolbar"><button class="btn btn-primary access-review" data-request-id="${item.id}" data-decision="approved">승인</button><button class="btn btn-danger access-review" data-request-id="${item.id}" data-decision="rejected">반려</button><button class="btn btn-secondary access-review" data-request-id="${item.id}" data-decision="on_hold">보류</button></div></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">처리할 Buyer 권한 요청이 없습니다.</div>`}</section><section class="panel"><div class="panel-head"><div><h2>사용자 목록</h2><span>팀장은 요청자·Buyer 범위만 변경할 수 있습니다.</span></div></div><div class="table-scroll"><table class="table"><thead><tr><th>사용자</th><th>부서 / 연락처</th><th>현재 역할</th><th>상태</th><th>가입일</th><th>권한 변경</th></tr></thead><tbody>${accessData.users.map((user) => { const isSelf = user.id === currentUser?.id; const leadRestricted = role === "lead" && !["requester", "buyer"].includes(user.role); const allowedRoles = role === "lead" ? ["requester", "buyer"] : ["requester", "buyer", "lead", "admin"]; return `<tr><td><strong>${esc(user.name || "-")}</strong><br/><small>${esc(user.email || "")}</small></td><td>${esc(user.department || "미입력")}<br/><small>${esc(user.phone || "미입력")}</small></td><td><span class="role-chip">${label[user.role] || user.role}</span></td><td><span class="status ${user.is_active ? "status-mint" : "status-red"}">${user.is_active ? "활성" : "비활성"}</span></td><td>${user.created_at ? new Date(user.created_at).toLocaleDateString("ko-KR") : "-"}</td><td>${isSelf || leadRestricted ? `<small>${isSelf ? "본인 계정은 변경할 수 없습니다." : "팀장 변경 범위 제외"}</small>` : `<div class="access-actions"><select class="access-role" data-user-id="${user.id}">${allowedRoles.map((value) => `<option value="${value}" ${user.role === value ? "selected" : ""}>${label[value]}</option>`).join("")}</select><select class="access-active" data-user-id="${user.id}"><option value="true" ${user.is_active ? "selected" : ""}>활성</option><option value="false" ${!user.is_active ? "selected" : ""}>비활성</option></select><button class="btn btn-secondary access-change" data-user-id="${user.id}">변경</button></div>`}</td></tr>`; }).join("")}</tbody></table></div></section>`;
+}
+
+function bindAccessManagementEvents() {
+  document.querySelector("#accessReload")?.addEventListener("click", () => { accessData.loaded = false; loadAccessData(); render(); });
+  document.querySelectorAll(".access-review").forEach((button) => button.addEventListener("click", async () => {
+    const decision = button.dataset.decision;
+    const label = { approved: "승인", rejected: "반려", on_hold: "보류" }[decision] || "처리";
+    const note = window.prompt(`Buyer 권한 요청 ${label} 사유를 입력해 주세요.`);
+    if (note === null) return;
+    try { await callAccessRpc("review_buyer_role_request", { request_id: button.dataset.requestId, next_status: decision, next_note: note }); accessData.loaded = false; await loadAccessData(); toast(`Buyer 권한 요청을 ${label}했습니다.`); }
+    catch (error) { toast(error.message || "Buyer 권한 요청 처리에 실패했습니다."); }
+  }));
+  document.querySelectorAll(".access-change").forEach((button) => button.addEventListener("click", async () => {
+    const id = button.dataset.userId;
+    const role = document.querySelector(`.access-role[data-user-id='${id}']`)?.value;
+    const isActive = document.querySelector(`.access-active[data-user-id='${id}']`)?.value === "true";
+    const reason = window.prompt("권한 또는 상태 변경 사유를 입력해 주세요.");
+    if (reason === null) return;
+    try { await callAccessRpc("change_user_access", { target_id: id, next_role: role, next_is_active: isActive, change_reason: reason }); accessData.loaded = false; await loadAccessData(); toast("사용자 권한을 변경했습니다."); }
+    catch (error) { toast(error.message || "사용자 권한 변경에 실패했습니다."); }
+  }));
+}
+
 const originalRender = render;
 render = function () {
   if (!currentUser) { renderAuth(); return; }
@@ -1561,6 +1614,12 @@ render = function () {
     document.querySelector(".content").innerHTML = profileView();
     document.querySelector(".crumb").textContent = "NP MKT / 내 프로필";
     bindProfileEvents();
+  }
+  if (state.view === "access") {
+    document.querySelector(".content").innerHTML = accessManagementView();
+    document.querySelector(".crumb").textContent = "NP MKT / 사용자 권한 관리";
+    bindAccessManagementEvents();
+    if (!accessData.loaded && !accessData.loading) loadAccessData();
   }
   if (state.view === "imports") enhanceCdImportQuality();
   if (state.view === "detail") enhancePurchaseOrderTracking();
@@ -1586,6 +1645,17 @@ render = function () {
       profileButton.className = state.view === "profile" ? "active" : "";
       profileButton.addEventListener("click", () => { state.view = "profile"; render(); });
       nav.appendChild(profileButton);
+    }
+  }
+  if (["lead", "admin"].includes(normalizedRole(currentUser?.role)) && !document.querySelector("[data-view='access']")) {
+    const nav = document.querySelector(".nav");
+    if (nav) {
+      const accessButton = document.createElement("button");
+      accessButton.textContent = "⚙　사용자 권한 관리";
+      accessButton.dataset.view = "access";
+      accessButton.className = state.view === "access" ? "active" : "";
+      accessButton.addEventListener("click", () => { state.view = "access"; render(); });
+      nav.appendChild(accessButton);
     }
   }
   if (!document.querySelector("[data-view='history']")) { const nav = document.querySelector(".nav"); if (nav) { const history = document.createElement("button"); history.textContent = "⌁　구매 이력"; history.dataset.view = "history"; history.className = state.view === "history" ? "active" : ""; history.addEventListener("click", () => { state.view = "history"; render(); }); nav.appendChild(history); } }
