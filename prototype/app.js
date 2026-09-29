@@ -35,6 +35,7 @@ const initialUsers = [{ name: "김희균", email: "buyer@np-mkt.local", password
 let authState = loadAuth();
 let currentUser = authState.currentUser;
 let authConfig = { configured: false };
+let workspaceSync = { version: 0, timer: null, saving: false, pending: false, initialized: false, lastError: "" };
 let accessData = { loaded: false, loading: false, users: [], requests: [], assignments: [], audits: [], error: "" };
 let notificationData = { loaded: false, loading: false, rows: [], error: "" };
 function normalizedRole(value) { return ["requester", "lead", "buyer", "admin"].includes(value) ? value : "requester"; }
@@ -61,6 +62,81 @@ async function supabaseAuthRequest(path, options = {}) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload?.msg || payload?.message || payload?.error_description || "인증 처리에 실패했습니다.");
   return payload;
+}
+function currentSupabaseSession() {
+  try { return JSON.parse(localStorage.getItem(SUPABASE_SESSION_KEY) || "null"); } catch { return null; }
+}
+function workspaceStateForSync() {
+  const snapshot = structuredClone(state);
+  delete snapshot.role;
+  delete snapshot.view;
+  delete snapshot.selectedId;
+  return snapshot;
+}
+function normalizeWorkspaceState(nextState) {
+  const merged = { ...structuredClone(initialState), ...(nextState || {}) };
+  merged.cdTransactions = (merged.cdTransactions || []).map(normalizeCdTransaction);
+  merged.importBatches = merged.importBatches || [];
+  merged.importWarnings = merged.importWarnings || [];
+  merged.maintenancePayments = merged.maintenancePayments || [];
+  merged.shipments = merged.shipments || [];
+  merged.contractImportHistory = merged.contractImportHistory || [];
+  merged.buyerCategoryMappings = merged.buyerCategoryMappings || {};
+  merged.categoryAliases = merged.categoryAliases || {};
+  return merged;
+}
+async function loadSharedWorkspaceState({ seedLocal = false } = {}) {
+  if (!supabaseAuthEnabled() || !currentUser) return false;
+  const session = currentSupabaseSession();
+  if (!session?.access_token) return false;
+  const rows = await supabaseAuthRequest("/rest/v1/app_shared_state?select=state,version,updated_at&id=eq.workspace", { headers: { Authorization: `Bearer ${session.access_token}` } });
+  const saved = Array.isArray(rows) ? rows[0] : null;
+  if (!saved?.state || !Object.keys(saved.state).length) {
+    workspaceSync.version = 0;
+    if (seedLocal) await persistSharedWorkspaceState();
+    return false;
+  }
+  const uiState = { role: state.role, view: state.view, selectedId: state.selectedId };
+  state = normalizeWorkspaceState({ ...saved.state, ...uiState });
+  workspaceSync.version = Number(saved.version || 0);
+  workspaceSync.initialized = true;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  return true;
+}
+function queueSharedWorkspaceSave() {
+  if (!supabaseAuthEnabled() || !currentUser) return;
+  clearTimeout(workspaceSync.timer);
+  workspaceSync.timer = setTimeout(() => { persistSharedWorkspaceState(); }, 250);
+}
+async function persistSharedWorkspaceState() {
+  if (!supabaseAuthEnabled() || !currentUser) return;
+  if (workspaceSync.saving) { workspaceSync.pending = true; return; }
+  const session = currentSupabaseSession();
+  if (!session?.access_token) return;
+  workspaceSync.saving = true;
+  try {
+    const result = await supabaseAuthRequest("/rest/v1/rpc/save_shared_workspace_state", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${session.access_token}` },
+      body: JSON.stringify({ next_state: workspaceStateForSync(), expected_version: workspaceSync.version }),
+    });
+    const payload = Array.isArray(result) ? result[0] : result;
+    const version = Number(payload?.version || 0);
+    if (!version) {
+      await loadSharedWorkspaceState();
+      if (document.querySelector("#app")) toast("다른 PC에서 변경된 데이터가 있어 최신 내용으로 새로고침했습니다.");
+      return;
+    }
+    workspaceSync.version = version;
+    workspaceSync.initialized = true;
+    workspaceSync.lastError = "";
+  } catch (error) {
+    workspaceSync.lastError = error?.message || "공용 데이터 저장에 실패했습니다.";
+    console.warn("Shared workspace sync failed", error);
+  } finally {
+    workspaceSync.saving = false;
+    if (workspaceSync.pending) { workspaceSync.pending = false; queueSharedWorkspaceSave(); }
+  }
 }
 async function profileForSession(session) {
   const userId = session?.user?.id;
@@ -144,6 +220,10 @@ async function bootstrapAuth() {
       if (session?.access_token && (!session.expires_at || session.expires_at * 1000 > Date.now())) currentUser = await profileForSession(session);
     } catch { clearSupabaseSession(); }
   }
+  if (currentUser) {
+    try { await loadSharedWorkspaceState({ seedLocal: true }); }
+    catch (error) { workspaceSync.lastError = error?.message || "공용 데이터를 불러오지 못했습니다."; }
+  }
   render();
 }
 async function completeLogin(user) {
@@ -152,7 +232,11 @@ async function completeLogin(user) {
   state.role = user.role;
   state.view = "dashboard";
   saveAuth();
-  saveState();
+  try { await loadSharedWorkspaceState({ seedLocal: true }); }
+  catch (error) { workspaceSync.lastError = error?.message || "공용 데이터를 불러오지 못했습니다."; }
+  state.role = user.role;
+  state.view = "dashboard";
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   render();
 }
 function renderAuth(mode = "login", error = "") {
@@ -169,19 +253,11 @@ function renderAuth(mode = "login", error = "") {
   }
   document.querySelector("#authForm").addEventListener("submit", async (event) => { event.preventDefault(); const form = new FormData(event.target); const email = String(form.get("email")).trim().toLowerCase(); const password = String(form.get("password")); try { if (mode === "login") { const user = remote ? await loginWithSupabase(email, password) : authState.users.find((item) => item.email === email && item.password === password); if (!user) throw new Error("이메일 또는 비밀번호를 확인해 주세요."); await completeLogin(remote ? user : { name: user.name, email: user.email, role: normalizedRole(user.role) }); return; } if (password !== String(form.get("passwordConfirm"))) throw new Error("비밀번호가 일치하지 않습니다."); if (!remote && authState.users.some((item) => item.email === email)) throw new Error("이미 등록된 이메일입니다."); const name = String(form.get("name")).trim(); const department = String(form.get("department") || "").trim(); const phone = String(form.get("phone") || "").trim(); const requestedRole = String(form.get("roleRequest")) === "buyer" ? "buyer" : "requester"; const requestedCategories = form.getAll("requestedCategory").map((value) => String(value)); if (requestedRole === "buyer" && !requestedCategories.length) throw new Error("Buyer 권한 요청 시 희망 담당 카테고리를 1개 이상 선택해 주세요."); if (remote) { const user = await registerWithSupabase(name, email, password, requestedRole, department, phone, requestedCategories); if (!user) { renderAuth("login", "가입은 완료됐습니다. 입력한 이메일과 비밀번호로 로그인해 주세요."); return; } await completeLogin(user); return; } const user = { name, email, password, department, phone, role: "requester" }; authState.users.push(user); await completeLogin(user); } catch (submitError) { renderAuth(mode, submitError.message || "인증 처리에 실패했습니다."); } });
 }
-let state = loadState();
+let state = normalizeWorkspaceState(loadState());
 if (currentUser) state.role = normalizedRole(currentUser.role);
-state.cdTransactions = (state.cdTransactions || []).map(normalizeCdTransaction);
-state.importBatches = state.importBatches || [];
-state.importWarnings = state.importWarnings || [];
-state.maintenancePayments = state.maintenancePayments || [];
-state.shipments = state.shipments || [];
-state.contractImportHistory = state.contractImportHistory || [];
-state.buyerCategoryMappings = state.buyerCategoryMappings || {};
-state.categoryAliases = state.categoryAliases || {};
 if (JSON.stringify(state.cdTransactions).includes("�")) { state.cdTransactions = []; state.importBatches = []; saveState(); }
 function loadState() { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || structuredClone(initialState); } catch { return structuredClone(initialState); } }
-function saveState() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
+function saveState() { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); queueSharedWorkspaceSave(); }
 function esc(value = "") { return String(value).replace(/[&<>'"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" }[c])); }
 function finiteNumber(value, fallback = 0) {
   if (value === null || value === undefined || value === "") return fallback;
@@ -267,7 +343,8 @@ async function refreshConnectionStatus() {
 function layout() {
   const role = roles[normalizedRole(currentUser?.role)] || roles.requester;
   const profile = currentUser || role;
-  return `<div class="shell"><aside class="sidebar"><div class="brand"><div class="brand-mark">NP</div><div><strong>NP MKT</strong><span>구매업무 통합시스템</span></div></div><nav class="nav"><button class="${state.view === "dashboard" ? "active" : ""}" data-view="dashboard">⌂　대시보드</button><button class="${state.view === "requests" || state.view === "detail" ? "active" : ""}" data-view="requests">▤　구매요청</button><button class="${state.view === "analysis" ? "active" : ""}" data-view="analysis">◈　구매 분석</button><button class="${state.view === "costdown" ? "active" : ""}" data-view="costdown">↘　Cost Down</button><button class="${state.view === "pricing" ? "active" : ""}" data-view="pricing">₩　단가·업체 분석</button><button class="${state.view === "recommend" ? "active" : ""}" data-view="recommend">★　업체 추천</button><button class="${state.view === "mail" ? "active" : ""}" data-view="mail">✉　견적 메일</button><button class="${state.view === "suppliers" ? "active" : ""}" data-view="suppliers">⌘　업체 관리</button><button class="${state.view === "ai" ? "active" : ""}" data-view="ai">✦　AI 검색</button><button class="${state.view === "contracts" ? "active" : ""}" data-view="contracts">◷　계약·지불관리</button><button class="${state.view === "imports" ? "active" : ""}" data-view="imports">⇧　CD 업로드</button></nav><div class="sidebar-foot">로컬 프로토타입 v0.1<br/>Supabase/Vercel 연결 전 검증용</div></aside><main class="main"><header class="topbar"><span class="crumb">NP MKT / ${state.view === "dashboard" ? "대시보드" : state.view === "requests" ? "구매요청" : state.view === "detail" ? "구매요청 상세" : state.view === "analysis" ? "구매 분석" : state.view === "costdown" ? "Cost Down 분석" : state.view === "pricing" ? "단가·업체 분석" : state.view === "recommend" ? "업체 추천" : state.view === "mail" ? "견적 메일" : state.view === "suppliers" ? "업체 관리" : state.view === "ai" ? "AI 검색" : state.view === "imports" ? "CD 업로드" : "계약·지불관리"}</span><div class="top-actions"><span class="role-chip">${esc(role.label)}</span><div class="profile"><div class="avatar">${esc(profile.name.slice(0, 2))}</div>${esc(profile.name)}</div></div></header><section class="content">${state.view === "dashboard" ? dashboardView() : state.view === "requests" ? requestsView() : state.view === "detail" ? detailView() : state.view === "analysis" ? analysisView() : state.view === "costdown" ? costdownView() : state.view === "pricing" ? pricingView() : state.view === "recommend" ? recommendView() : state.view === "mail" ? mailView() : state.view === "suppliers" ? suppliersView() : state.view === "ai" ? aiView() : state.view === "imports" ? importsView() : contractsView()}</section></main></div>`;
+  const syncLabel = supabaseAuthEnabled() ? (workspaceSync.lastError ? "공용 데이터 동기화 확인 필요" : "공용 데이터 동기화") : "로컬 검증 모드";
+  return `<div class="shell"><aside class="sidebar"><div class="brand"><div class="brand-mark">NP</div><div><strong>NP MKT</strong><span>구매업무 통합시스템</span></div></div><nav class="nav"><button class="${state.view === "dashboard" ? "active" : ""}" data-view="dashboard">⌂　대시보드</button><button class="${state.view === "requests" || state.view === "detail" ? "active" : ""}" data-view="requests">▤　구매요청</button><button class="${state.view === "analysis" ? "active" : ""}" data-view="analysis">◈　구매 분석</button><button class="${state.view === "costdown" ? "active" : ""}" data-view="costdown">↘　Cost Down</button><button class="${state.view === "pricing" ? "active" : ""}" data-view="pricing">₩　단가·업체 분석</button><button class="${state.view === "recommend" ? "active" : ""}" data-view="recommend">★　업체 추천</button><button class="${state.view === "mail" ? "active" : ""}" data-view="mail">✉　견적 메일</button><button class="${state.view === "suppliers" ? "active" : ""}" data-view="suppliers">⌘　업체 관리</button><button class="${state.view === "ai" ? "active" : ""}" data-view="ai">✦　AI 검색</button><button class="${state.view === "contracts" ? "active" : ""}" data-view="contracts">◷　계약·지불관리</button><button class="${state.view === "imports" ? "active" : ""}" data-view="imports">⇧　CD 업로드</button></nav><div class="sidebar-foot">${syncLabel}<br/>Supabase 기반 공용 작업공간</div></aside><main class="main"><header class="topbar"><span class="crumb">NP MKT / ${state.view === "dashboard" ? "대시보드" : state.view === "requests" ? "구매요청" : state.view === "detail" ? "구매요청 상세" : state.view === "analysis" ? "구매 분석" : state.view === "costdown" ? "Cost Down 분석" : state.view === "pricing" ? "단가·업체 분석" : state.view === "recommend" ? "업체 추천" : state.view === "mail" ? "견적 메일" : state.view === "suppliers" ? "업체 관리" : state.view === "ai" ? "AI 검색" : state.view === "imports" ? "CD 업로드" : "계약·지불관리"}</span><div class="top-actions"><span class="role-chip">${esc(role.label)}</span><div class="profile"><div class="avatar">${esc(profile.name.slice(0, 2))}</div>${esc(profile.name)}</div></div></header><section class="content">${state.view === "dashboard" ? dashboardView() : state.view === "requests" ? requestsView() : state.view === "detail" ? detailView() : state.view === "analysis" ? analysisView() : state.view === "costdown" ? costdownView() : state.view === "pricing" ? pricingView() : state.view === "recommend" ? recommendView() : state.view === "mail" ? mailView() : state.view === "suppliers" ? suppliersView() : state.view === "ai" ? aiView() : state.view === "imports" ? importsView() : contractsView()}</section></main></div>`;
 }
 
 function dashboardView() {
@@ -1827,5 +1904,13 @@ function contractsView() {
   const expiring = contracts.filter((c) => { const d = new Date(c.endDate || c.end); return !Number.isNaN(d.getTime()) && d <= new Date(Date.now() + 60 * 86400000); });
   return `<div class="page-head"><div><h1>계약·지불관리</h1><p>유지보수 계약, 발주 후 Ship Confirm, 월별 지급 및 AP 전표를 관리합니다.</p></div><div class="toolbar">${canUpload ? `<label class="btn btn-secondary contract-upload-label"><input id="contractFileInput" type="file" accept=".xlsx,.xlsm" hidden/>AP 계약관리 파일 업로드</label>` : ""}<button class="btn btn-primary" data-action="generate-payments">이번 달 지불대상 생성</button></div></div><div class="cards"><div class="metric"><div class="label">계약 전체</div><div class="value">${contracts.length.toLocaleString("ko-KR")}</div><div class="note">PO + 계약 ID 기준</div></div><div class="metric"><div class="label">D-60 만료 대상</div><div class="value">${expiring.length.toLocaleString("ko-KR")}</div><div class="note">Buyer 알림 대상</div></div><div class="metric"><div class="label">지급 대상</div><div class="value">${payments.length.toLocaleString("ko-KR")}</div><div class="note">매월 20일 기준</div></div><div class="metric"><div class="label">Ship Confirm</div><div class="value">${shipments.length.toLocaleString("ko-KR")}</div><div class="note">부분 출고 포함</div></div></div><div class="panel"><div class="panel-head"><h2>유지보수 계약 목록</h2><span>계약 만료 알림: D-60 · D-30</span></div>${contracts.length ? `<div class="table-scroll"><table class="table"><thead><tr><th>PO 번호</th><th>계약 ID</th><th>업체</th><th>제품/설명</th><th>종료일</th><th>지급월도</th><th>금액</th><th>Buyer</th></tr></thead><tbody>${contracts.slice(0,100).map((c) => `<tr><td>${esc(c.poNumber || "-")}</td><td><strong>${esc(c.contractId || c.id || "-")}</strong></td><td>${esc(c.vendor || c.supplierName || "-")}</td><td class="wrap-cell">${esc(c.product || "-")}</td><td>${esc(c.endDate || c.end || "-")}</td><td>${esc(c.billingCycle || c.cycle || "-")}</td><td class="num">${money(c.amount || 0, c.currency || "KRW")}</td><td>${esc(c.buyer || "-")}</td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">AP 계약관리 파일을 업로드하면 계약 데이터가 표시됩니다.</div>`}</div><div class="panel"><div class="panel-head"><h2>월별 지급 대상</h2><span>${payments.length}건 · Buyer만 상태 변경 가능</span></div>${payments.length ? `<div class="table-scroll"><table class="table"><thead><tr><th>업체</th><th>제품/설명</th><th>지급월도</th><th>금액</th><th>인보이스번호</th><th>AP 전표번호</th><th>상태</th></tr></thead><tbody>${payments.slice(0,100).map((p) => `<tr><td>${esc(p.supplierName || "-")}</td><td class="wrap-cell">${esc(p.product || "-")}</td><td>${esc(p.paymentMonth || "-")}</td><td class="num">${money(p.amountExclVat || 0)}</td><td>${esc(p.invoiceNumber || "-")}</td><td>${esc(p.apSlipNumber || "-")}</td><td><span class="status ${statusClass(p.paymentStatus)}">${esc(p.paymentStatus || "인수증 발행")}</span></td></tr>`).join("")}</tbody></table></div>` : `<div class="empty">지급 대상 데이터가 없습니다.</div>`}</div><div class="panel"><div class="panel-head"><h2>업로드 이력</h2><span>${state.contractImportHistory.length}건</span></div>${state.contractImportHistory.length ? `<table class="table"><thead><tr><th>파일명</th><th>업로드일시</th><th>계약</th><th>지급</th><th>Ship Confirm</th><th>신규</th><th>갱신</th><th>경고</th></tr></thead><tbody>${state.contractImportHistory.slice().reverse().map((h) => `<tr><td>${esc(h.fileName)}</td><td>${esc(h.uploadedAt)}</td><td>${h.rows || 0}</td><td>${h.payments || 0}</td><td>${h.shipments || 0}</td><td>${h.newRows || 0}</td><td>${h.updatedRows || 0}</td><td>${h.warnings || 0}</td></tr>`).join("")}</tbody></table>` : `<div class="empty">업로드 이력이 없습니다.</div>`}</div>`;
 }
+
+window.addEventListener("focus", async () => {
+  if (!supabaseAuthEnabled() || !currentUser || workspaceSync.saving || workspaceSync.timer) return;
+  const beforeVersion = workspaceSync.version;
+  try {
+    if (await loadSharedWorkspaceState() && workspaceSync.version > beforeVersion) render();
+  } catch { /* 다음 저장 또는 새로고침 시 다시 동기화합니다. */ }
+});
 
 bootstrapAuth();
